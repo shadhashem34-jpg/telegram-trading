@@ -4,4 +4,3 @@ sqlalchemy[asyncio]
 aiosqlite
 python-dotenv
 requests
-structlog
