@@ -1,11 +1,9 @@
 """
-Telegram Trading Bot - Main Entry Point
+Telegram Trading Bot - Lightweight Entry Point
 """
 import os
 import sys
 import asyncio
-from threading import Thread
-from flask import Flask, jsonify
 import signal
 from dotenv import load_dotenv
 
@@ -20,15 +18,6 @@ from reporting import ReportingSystem
 from logger import setup_logging
 
 logger = setup_logging()
-app = Flask(__name__)
-
-@app.route('/health')
-def health_check():
-    return jsonify({'status': 'healthy', 'service': 'telegram-trading-bot'})
-
-@app.route('/')
-def index():
-    return jsonify({'message': 'Telegram Trading Bot is running', 'status': 'active'})
 
 class TradingBotOrchestrator:
     def __init__(self):
@@ -74,17 +63,12 @@ class TradingBotOrchestrator:
             if self.reporting: await self.reporting.stop()
             if self.market_data: await self.market_data.stop()
 
-def run_flask_app():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
-
 async def main():
     bot = TradingBotOrchestrator()
     def signal_handler(signum, frame): bot.running = False
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     try:
-        Thread(target=run_flask_app, daemon=True).start()
         await bot.start()
     except Exception as e:
         logger.error(f"❌ Unexpected error: {e}")
