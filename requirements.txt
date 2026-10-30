@@ -4,3 +4,4 @@ SQLAlchemy
 aiosqlite
 python-dotenv
 requests
+structlog
