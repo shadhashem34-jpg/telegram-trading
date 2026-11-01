@@ -19,8 +19,8 @@ class StrategyManager:
         self.running = True
         logger.log_system_event("Strategy Monitoring Started (Scanning Market...)")
         
-        # 🚀 سیگنال تستی برای اینکه مطمئن بشی پیام رسانی کار میکنه
-        await asyncio.sleep(10) # صبر میکنیم تلگرام کامل وصل بشه
+        # 🚀 سیگنال تستی
+        await asyncio.sleep(15) # ۱۵ ثانیه صبر میکنیم تا تلگرام ۱۰۰٪ وصل بشه
         if self.telegram_bot:
             logger.log_system_event("🚨 SENDING TEST SIGNAL TO TELEGRAM...")
             test_signal = {
@@ -31,15 +31,17 @@ class StrategyManager:
                 'take_profit_1': 67000.0,
                 'take_profit_2': 68000.0
             }
-            try:
-                await self.telegram_bot.send_signal(test_signal)
-                logger.log_system_event("✅ TEST signal dispatched to Telegram.")
-            except Exception as e:
-                logger.log_system_event(f"❌ Failed to send test signal: {e}")
+            
+            # اگر ارسال موفق بود، لاگ موفقیت میزنیم
+            success = await self.telegram_bot.send_signal(test_signal)
+            if success:
+                logger.log_system_event("✅ TEST signal successfully CONFIRMED in Telegram.")
+            else:
+                logger.log_system_event("❌ TEST signal FAILED after 3 attempts. Check your network/DNS.")
         else:
             logger.log_system_event("⚠️ Telegram bot not connected, skipping test signal.")
 
-        # لیست ارزهایی که میخوای اسکن بشه
+        # لیست ارزها
         symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XAUUSD"] 
         
         while self.running:
@@ -57,7 +59,6 @@ class StrategyManager:
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
             
-            # هر ۶۰ ثانیه یک بار بازار رو اسکن کن
             await asyncio.sleep(60)
 
     async def stop(self):
