@@ -1,57 +1,133 @@
-import os, asyncio
-from typing import Dict
-from datetime import datetime, timezone
+import asyncio
+from pybit.unified_trading import HTTP
 from logger import get_trading_logger
-
-try:
-    from pybit.unified_trading import HTTP as BybitClient
-except ImportError:
-    BybitClient = None
 
 logger = get_trading_logger()
 
 class MarketDataHandler:
     def __init__(self):
-        self.running = False
-        self.data_sources = {}
-        self.crypto_pairs = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT', 'DOGEUSDT', 'LTCUSDT', 'BCHUSDT', 'TRXUSDT', 'UNIUSDT', 'ATOMUSDT', 'ETCUSDT', 'FILUSDT', 'APTUSDT', 'SUIUSDT', 'ARBUSDT', 'OPUSDT', 'NEARUSDT', 'INJUSDT', 'MATICUSDT']
-        self.forex_pairs = ['XAUUSD']
-        self._initialize_clients()
-
-    def _initialize_clients(self):
-        try:
-            if os.getenv('BYBIT_API_KEY') and os.getenv('BYBIT_SECRET_KEY'):
-                self.data_sources['bybit'] = BybitClient(testnet=False, api_key=os.getenv('BYBIT_API_KEY'), api_secret=os.getenv('BYBIT_SECRET_KEY'))
-        except Exception: pass
+        self.session = HTTP(testnet=False)
+        self.symbols = [
+            "XAUUSD", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
+            "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT", 
+            "LTCUSDT", "BCHUSDT", "TRXUSDT", "UNIUSDT", "ATOMUSDT", 
+            "ETCUSDT", "FILUSDT", "APTUSDT", "SUIUSDT", "ARBUSDT", 
+            "OPUSDT", "NEARUSDT", "INJUSDT", "MATICUSDT"
+        ]
 
     async def start_data_collection(self):
-        self.running = True
-        while self.running: await asyncio.sleep(10)
-    async def stop(self): self.running = False
+        while True:
+            await asyncio.sleep(60)
 
-    def calculate_indicators(self, klines: list) -> dict:
-        if not klines or len(klines) < 20: return {}
-        klines.reverse()
-        closes = [float(k[4]) for k in klines]; highs = [float(k[2]) for k in klines]; lows = [float(k[3]) for k in klines]; volumes = [float(k[5]) for k in klines]
-        def ema(data, period):
-            multiplier = 2 / (period + 1); ema_val = data[0]
-            for price in data[1:]: ema_val = (price - ema_val) * multiplier + ema_val
-            return ema_val
-        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(klines))]
-        atr = sum(trs[-14:]) / 14 if len(trs) >= 14 else (trs[-1] if trs else 0)
-        current_close = closes[-1]
-        prev_h20 = max(highs[-21:-1]) if len(highs) > 21 else max(highs)
-        prev_l20 = min(lows[-21:-1]) if len(lows) > 21 else min(lows)
-        return {'close': current_close, 'ema_200': ema(closes, 200), 'ema_50': ema(closes, 50), 'adx': 25.0, 'atr': atr, 'volume': volumes[-1], 'volume_avg_20': sum(volumes[-20:]) / 20, 'high_5': max(highs[-5:]), 'low_5': min(lows[-5:]), 'high_20': max(highs[-20:]), 'low_20': min(lows[-20:]), 'high_100': max(highs[-100:]) if len(highs) >= 100 else max(highs), 'low_100': min(lows[-100:]) if len(lows) >= 100 else min(lows), 'near_ema_50': abs(current_close - ema(closes, 50)) < (atr * 2.5), 'near_level': (abs(current_close - prev_h20) < (atr * 2.5)) or (abs(current_close - prev_l20) < (atr * 2.5))}
+    def _calculate_ema(self, prices, period):
+        if len(prices) < period: return prices[-1] if prices else 0
+        multiplier = 2 / (period + 1)
+        ema = sum(prices[:period]) / period
+        for price in prices[period:]:
+            ema = (price - ema) * multiplier + ema
+        return ema
 
-    async def get_market_data(self, symbol: str) -> dict:
+    def _calculate_atr(self, highs, lows, closes, period=14):
+        if len(closes) < period + 1: return 0
+        trs = []
+        for i in range(1, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            trs.append(tr)
+        return sum(trs[-period:]) / period
+
+    def _calculate_adx(self, highs, lows, closes, period=14):
+        # محاسبه واقعی ADX بدون نیاز به کتابخانه خارجی
+        if len(closes) < period * 2: return 25.0 # فالبک در صورت کمبود دیتا
+        
+        trs, plus_dms, minus_dms = [], [], []
+        for i in range(1, len(closes)):
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            trs.append(tr)
+            
+            up_move = highs[i] - highs[i-1]
+            down_move = lows[i-1] - lows[i]
+            
+            plus_dm = up_move if (up_move > down_move and up_move > 0) else 0
+            minus_dm = down_move if (down_move > up_move and down_move > 0) else 0
+            
+            plus_dms.append(plus_dm)
+            minus_dms.append(minus_dm)
+            
+        # هموارسازی وایلدر
+        smooth_tr = sum(trs[-period:])
+        smooth_plus_dm = sum(plus_dms[-period:])
+        smooth_minus_dm = sum(minus_dms[-period:])
+        
+        if smooth_tr == 0: return 25.0
+        
+        plus_di = 100 * (smooth_plus_dm / smooth_tr)
+        minus_di = 100 * (smooth_minus_dm / smooth_tr)
+        
+        if (plus_di + minus_di) == 0: return 25.0
+        
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        return dx # برای سادگی DX را به عنوان ADX برمی‌گردانیم
+
+    async def get_market_data(self, symbol):
         try:
-            if 'bybit' not in self.data_sources: return {}
-            client = self.data_sources['bybit']
-            h4_res = client.get_kline(category="linear", symbol=symbol, interval="240", limit=200)
-            h1_res = client.get_kline(category="linear", symbol=symbol, interval="60", limit=200)
-            m15_res = client.get_kline(category="linear", symbol=symbol, interval="15", limit=200)
-            if h4_res.get('retCode') == 0 and h1_res.get('retCode') == 0 and m15_res.get('retCode') == 0:
-                return {'h4': self.calculate_indicators(h4_res.get('result', {}).get('list', [])), 'h1': self.calculate_indicators(h1_res.get('result', {}).get('list', [])), 'm15': self.calculate_indicators(m15_res.get('result', {}).get('list', []))}
-        except Exception as e: logger.log_error(e, {"context": f"fetch_{symbol}"})
-        return {}
+            # دریافت دیتای 4 ساعته، 1 ساعته و 30 دقیقه
+            kline_4h = self.session.get_kline(category="linear" if "USDT" in symbol else "inverse", symbol=symbol if symbol != "XAUUSD" else "XAUUSD", interval="240", limit=200)['result']['list']
+            kline_1h = self.session.get_kline(category="linear" if "USDT" in symbol else "inverse", symbol=symbol if symbol != "XAUUSD" else "XAUUSD", interval="60", limit=200)['result']['list']
+            kline_30m = self.session.get_kline(category="linear" if "USDT" in symbol else "inverse", symbol=symbol if symbol != "XAUUSD" else "XAUUSD", interval="30", limit=200)['result']['list']
+
+            # دیتای بای‌بیت برعکس هست (جدیدترین اول)، پس برعکسشون میکنیم
+            k4h = kline_4h[::-1]
+            k1h = kline_1h[::-1]
+            k30m = kline_30m[::-1]
+
+            if not k4h or not k1h or not k30m: return None
+
+            # --- پردازش 4H ---
+            h4_closes = [float(k[4]) for k in k4h]
+            h4_highs = [float(k[2]) for k in k4h]
+            h4_lows = [float(k[3]) for k in k4h]
+            
+            ema_200_4h = self._calculate_ema(h4_closes, 200)
+            adx_4h = self._calculate_adx(h4_highs, h4_lows, h4_closes)
+            
+            # --- پردازش 1H ---
+            h1_closes = [float(k[4]) for k in k1h]
+            h1_highs = [float(k[2]) for k in k1h]
+            h1_lows = [float(k[3]) for k in k1h]
+            
+            ema_20_1h = self._calculate_ema(h1_closes, 20)
+            atr_1h = self._calculate_atr(h1_highs, h1_lows, h1_closes)
+            
+            # --- پردازش 30M ---
+            m30_closes = [float(k[4]) for k in k30m]
+            m30_highs = [float(k[2]) for k in k30m]
+            m30_lows = [float(k[3]) for k in k30m]
+            m30_volumes = [float(k[5]) for k in k30m]
+
+            return {
+                'h4': {
+                    'close': h4_closes[-1], 
+                    'ema_200': ema_200_4h,
+                    'adx': adx_4h,
+                    'high_100': max(h4_highs[-100:]),
+                    'low_100': min(h4_lows[-100:]),
+                    'high_20': max(h4_highs[-20:])
+                },
+                'h1': {
+                    'close': h1_closes[-1],
+                    'ema_20': ema_20_1h,
+                    'atr': atr_1h,
+                    'high_20': max(h1_highs[-20:]),
+                    'low_20': min(h1_lows[-20:])
+                },
+                'm30': {
+                    'close': m30_closes[-1],
+                    'high_5': max(m30_highs[-6:-1]), # سقف 5 کندل قبل
+                    'low_5': min(m30_lows[-6:-1]),   # کف 5 کندل قبل
+                    'volume': m30_volumes[-1],
+                    'volume_avg_20': sum(m30_volumes[-20:]) / 20
+                }
+            }
+        except Exception as e:
+            logger.log_system_event(f"Error fetching data for {symbol}: {e}")
+            return None
