@@ -1,5 +1,13 @@
 import os
 import asyncio
+import socket
+
+# 🛠️ فیکس قطعی مشکل DNS و IPv6 در سرورهای ابری
+_original_getaddrinfo = socket.getaddrinfo
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _getaddrinfo_ipv4
+
 import telegram
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -33,14 +41,12 @@ class TelegramBot:
         while self.running:
             try:
                 logger.log_system_event("Building Telegram Application...")
-                # هر بار از صفر ساخته میشه تا هیچ حافظه‌ای خراب نمونه
                 self.application = (
                     Application.builder()
                     .token(self.token)
-                    .read_timeout(60)
-                    .write_timeout(60)
-                    .connect_timeout(60)
-                    .pool_timeout(60)
+                    .read_timeout(30)
+                    .write_timeout(30)
+                    .connect_timeout(30)
                     .build()
                 )
                 
@@ -48,22 +54,14 @@ class TelegramBot:
                 self.application.add_handler(CommandHandler("help", self.help_command))
                 self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
-                logger.log_system_event("Clearing old Telegram webhooks...")
                 try:
                     await self.application.bot.delete_webhook(drop_pending_updates=True)
                 except Exception as e:
-                    logger.log_system_event(f"Webhook deletion warning: {e}")
+                    logger.log_system_event(f"Webhook warning: {e}")
 
-                logger.log_system_event("Initializing and starting polling...")
                 await self.application.initialize()
                 await self.application.start()
-                
-                # تایم‌اوت ۶۰ ثانیه‌ای برای دریافت پیام‌ها
-                await self.application.updater.start_polling(
-                    drop_pending_updates=True, 
-                    allowed_updates=Update.ALL_TYPES,
-                    timeout=60
-                )
+                await self.application.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
                 
                 logger.log_system_event("✅ Bot is live and polling for updates.")
                 
@@ -71,10 +69,9 @@ class TelegramBot:
                     await asyncio.sleep(5)
                     
             except Exception as e:
-                logger.log_system_event(f"⚠️ Telegram connection error: {e}. Retrying in 5 seconds...")
+                logger.log_system_event(f"⚠️ Connection error: {e}. Retrying in 5 seconds...")
                 await asyncio.sleep(5)
             finally:
-                # پاکسازی کامل قبل از تلاش بعدی
                 if self.application:
                     try:
                         if self.application.updater.running:
