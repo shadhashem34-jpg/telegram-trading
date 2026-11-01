@@ -32,13 +32,17 @@ class StrategyManager:
         now = datetime.now(timezone.utc)
         current_time = now.time()
         
-        # Iran Time (GMT+3:30) converted to UTC:
-        # 11:00 AM Iran = 07:30 UTC
-        # 03:00 AM Iran = 23:30 UTC
+        # Iran Time (GMT+3:30) converted to UTC: 11:00 AM to 03:00 AM next day
         start_time = time(7, 30)
         end_time = time(23, 30)
         
-        if not (start_time <= current_time <= end_time):
+        # Handle overnight window logic
+        if start_time <= end_time:
+            in_window = start_time <= current_time <= end_time
+        else:
+            in_window = current_time >= start_time or current_time <= end_time
+            
+        if not in_window:
             return False
             
         # Block 15 mins before/after London open (08:00 UTC)
@@ -82,7 +86,7 @@ class StrategyManager:
         if is_uptrend and breakout_up and volume_ok: signal_type = "BUY"
         elif is_downtrend and breakout_down and volume_ok: signal_type = "SELL"
 
-        # Signal Generation (Macro Levels + RR Filter)
+        # Signal Generation (Loosened Macro & RR Filters)
         if signal_type:
             entry_price = m15.get('close', 1.0000)
             atr_h1 = h1.get('atr', 0.0010) 
@@ -91,17 +95,26 @@ class StrategyManager:
             macro_low = h4.get('low_100', 0)
             
             if signal_type == "BUY":
-                if (macro_high - entry_price) < (atr_h1 * 1.0): return None
+                # LOOSENED MACRO FILTER: Reduced from 1.0 ATR to 0.5 ATR
+                if (macro_high - entry_price) < (atr_h1 * 0.5): return None
+                
                 stop_loss = entry_price - sl_distance
                 tp1 = min(h1.get('high_20', entry_price + (sl_distance * 1.5)), macro_high)
                 tp2 = min(h4.get('high_20', entry_price + (sl_distance * 3.0)), macro_high)
-                if (tp1 - entry_price) < (sl_distance * 1.5): return None
+                
+                # LOOSENED RR FILTER: Reduced from 1.5 to 1.2
+                if (tp1 - entry_price) < (sl_distance * 1.2): return None
+                
             else:
-                if (entry_price - macro_low) < (atr_h1 * 1.0): return None
+                # LOOSENED MACRO FILTER: Reduced from 1.0 ATR to 0.5 ATR
+                if (entry_price - macro_low) < (atr_h1 * 0.5): return None
+                
                 stop_loss = entry_price + sl_distance
                 tp1 = max(h1.get('low_20', entry_price - (sl_distance * 1.5)), macro_low)
                 tp2 = max(h4.get('low_20', entry_price - (sl_distance * 3.0)), macro_low)
-                if (entry_price - tp1) < (sl_distance * 1.5): return None
+                
+                # LOOSENED RR FILTER: Reduced from 1.5 to 1.2
+                if (entry_price - tp1) < (sl_distance * 1.2): return None
 
             signal = {'symbol': symbol, 'type': signal_type, 'entry_price': entry_price, 'stop_loss': stop_loss, 'take_profit_1': tp1, 'take_profit_2': tp2, 'strategy': '3-Layer_Strategy', 'session': 'Extended_Window', 'timestamp': datetime.now(timezone.utc)}
             self.signals_today += 1
