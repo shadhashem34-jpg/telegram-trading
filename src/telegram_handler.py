@@ -1,4 +1,6 @@
 import os
+import asyncio
+import telegram
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from logger import get_trading_logger
@@ -8,9 +10,13 @@ logger = get_trading_logger()
 
 class TelegramBot:
     def __init__(self, market_data, strategy_manager, reporting):
-        self.market_data = market_data; self.strategy_manager = strategy_manager; self.reporting = reporting
-        self.token = os.getenv('TELEGRAM_BOT_TOKEN'); self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
-        self.application = None; self.running = False
+        self.market_data = market_data
+        self.strategy_manager = strategy_manager
+        self.reporting = reporting
+        self.token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        self.application = None
+        self.running = False
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🤖 Trading Bot Started\n\n✅ System initialized\n📊 Ready to generate signals\n\nUse /help for available commands")
@@ -31,16 +37,37 @@ class TelegramBot:
 
         logger.log_system_event("Clearing old Telegram webhooks to prevent Conflict...")
         await self.application.bot.delete_webhook(drop_pending_updates=True)
+        
         await self.application.initialize()
         await self.application.start()
-        await self.application.updater.start_polling()
+        
         self.running = True
         
-        if self.chat_id:
-            try: await self.application.bot.send_message(chat_id=self.chat_id, text="🤖 Trading Bot Started\n\n✅ System initialized\n📊 Ready to generate signals")
-            except Exception: pass
+        # 🛡️ حلقه ضدضربه: اگر اینترنت قطع شد، خودش دوباره وصل می‌شود
+        while self.running:
+            try:
+                logger.log_system_event("Attempting to start polling...")
+                await self.application.updater.start_polling(
+                    drop_pending_updates=True,
+                    allowed_updates=Update.ALL_TYPES
+                )
+                # تا وقتی پولینگ فعاله، برنامه رو زنده نگه دار
+                while self.running and self.application.updater.running:
+                    await asyncio.sleep(5)
+                    
+            except telegram.error.NetworkError as e:
+                logger.log_system_event(f"⚠️ Network Error: {e}. Reconnecting in 10 seconds...")
+                await asyncio.sleep(10)
+            except Exception as e:
+                logger.log_system_event(f"⚠️ Unexpected error in polling: {e}. Reconnecting in 10 seconds...")
+                await asyncio.sleep(10)
 
     async def stop(self):
         self.running = False
         if self.application:
-            await self.application.updater.stop(); await self.application.stop(); await self.application.shutdown()
+            try:
+                await self.application.updater.stop()
+                await self.application.stop()
+                await self.application.shutdown()
+            except Exception:
+                pass
