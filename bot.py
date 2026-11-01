@@ -17,6 +17,10 @@ import os
 import sys
 from datetime import datetime
 
+# ── FIX FOR DEPLEXO ──
+# افزودن مسیر پوشه src به سیستم تا فایل‌های داخلش بتوانند همدیگر را پیدا کنند
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
 from dotenv import load_dotenv
 
 # ── Verify these import paths match your project structure ──
