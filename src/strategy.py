@@ -11,28 +11,45 @@ class StrategyManager:
         self.active_strategy = "3-Layer_Strategy"
         self.signals_today = 0
         self.max_daily_signals = 2
-        self.telegram_bot = None  # این رو bot.py بهش وصل میکنه
-        self.market_data = None   # این رو bot.py بهش وصل میکنه
+        self.telegram_bot = None  
+        self.market_data = None   
         logger.log_system_event("StrategyManager initialized")
 
     async def start_monitoring(self):
         self.running = True
         logger.log_system_event("Strategy Monitoring Started (Scanning Market...)")
         
+        # 🚀 سیگنال تستی برای اینکه مطمئن بشی پیام رسانی کار میکنه
+        await asyncio.sleep(10) # صبر میکنیم تلگرام کامل وصل بشه
+        if self.telegram_bot:
+            logger.log_system_event("🚨 SENDING TEST SIGNAL TO TELEGRAM...")
+            test_signal = {
+                'symbol': 'TEST-BTCUSDT',
+                'type': 'BUY (TEST)',
+                'entry_price': 65000.0,
+                'stop_loss': 64000.0,
+                'take_profit_1': 67000.0,
+                'take_profit_2': 68000.0
+            }
+            try:
+                await self.telegram_bot.send_signal(test_signal)
+                logger.log_system_event("✅ TEST signal dispatched to Telegram.")
+            except Exception as e:
+                logger.log_system_event(f"❌ Failed to send test signal: {e}")
+        else:
+            logger.log_system_event("⚠️ Telegram bot not connected, skipping test signal.")
+
         # لیست ارزهایی که میخوای اسکن بشه
         symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XAUUSD"] 
         
         while self.running:
             for symbol in symbols:
                 try:
-                    # گرفتن دیتای بازار
                     if self.market_data and hasattr(self.market_data, 'get_market_data'):
                         data = await self.market_data.get_market_data(symbol)
                         if data:
-                            # تولید سیگنال
                             signal = await self.generate_signal(symbol, data)
                             if signal:
-                                # فرستادن سیگنال به تلگرام
                                 if self.telegram_bot:
                                     await self.telegram_bot.send_signal(signal)
                                 else:
