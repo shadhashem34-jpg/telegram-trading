@@ -1,7 +1,3 @@
-"""
-bot.py - Main orchestrator for the trading bot.
-Fixed imports, paths, and exact class signatures.
-"""
 import asyncio
 import signal
 import logging
@@ -9,14 +5,12 @@ import os
 import sys
 from datetime import datetime
 
-# ── FIX: Add src to path so files inside src can find 'logger' and 'database' ──
+# ── FIX: Add src to path ──
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 sys.path.insert(0, os.path.join(current_dir, "src"))
 
 from dotenv import load_dotenv
-
-# ── FIX: Import directly since src is now in sys.path ──
 from telegram_handler import TelegramBot
 from strategy import StrategyManager
 from data_handler import MarketDataHandler
@@ -25,19 +19,6 @@ from logger import setup_logging
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-
-def test_tmp_persistence():
-    test_file = "/tmp/deplexo_persistence_test.txt"
-    try:
-        if os.path.exists(test_file):
-            with open(test_file, "r") as f:
-                logger.info(f"🔍 TEST FILE EXISTS: {f.read()}")
-        else:
-            with open(test_file, "w") as f:
-                f.write(f"created at {datetime.now().isoformat()}")
-            logger.info("🔍 TEST FILE CREATED (first run)")
-    except Exception as e:
-        logger.error(f"❌ /tmp test failed: {e}")
 
 class TradingBot:
     def __init__(self):
@@ -49,38 +30,25 @@ class TradingBot:
         self.reporting = None
 
     async def initialize(self):
-        # 1. Market Data
         self.market_data = MarketDataHandler()
-        
-        # 2. Strategy Manager (Takes 0 arguments based on your file)
         self.strategy_manager = StrategyManager()
-        
-        # 3. Reporting (Assuming it takes 0 args, if it errors we can fix later)
         self.reporting = ReportingSystem()
-
-        # 4. Telegram Bot (Takes exactly 3 args: market_data, strategy_manager, reporting)
-        self.telegram_bot = TelegramBot(
-            self.market_data, 
-            self.strategy_manager, 
-            self.reporting
-        )
+        
+        self.telegram_bot = TelegramBot(self.market_data, self.strategy_manager, self.reporting)
+        
+        # 🚀 این دو خط جادویی، استراتژی و تلگرام رو به هم وصل میکنه
+        self.strategy_manager.telegram_bot = self.telegram_bot
+        self.strategy_manager.market_data = self.market_data
             
-        logger.info("✅ All components initialized successfully")
+        logger.info("✅ All components connected successfully")
 
     async def run_components(self):
-        tasks = []
-        if self.telegram_bot and hasattr(self.telegram_bot, 'start'):
-            tasks.append(asyncio.create_task(self.telegram_bot.start(), name="telegram"))
-        if self.strategy_manager and hasattr(self.strategy_manager, 'start_monitoring'):
-            tasks.append(asyncio.create_task(self.strategy_manager.start_monitoring(), name="strategy"))
-        if self.reporting and hasattr(self.reporting, 'start'):
-            tasks.append(asyncio.create_task(self.reporting.start(), name="reporting"))
-        if self.market_data and hasattr(self.market_data, 'start_data_collection'):
-            tasks.append(asyncio.create_task(self.market_data.start_data_collection(), name="data"))
-
-        if not tasks:
-            logger.error("❌ No components to run!")
-            return
+        tasks = [
+            asyncio.create_task(self.telegram_bot.start(), name="telegram"),
+            asyncio.create_task(self.strategy_manager.start_monitoring(), name="strategy"),
+            asyncio.create_task(self.reporting.start(), name="reporting"),
+            asyncio.create_task(self.market_data.start_data_collection(), name="data"),
+        ]
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
 
@@ -88,8 +56,6 @@ class TradingBot:
             exc = task.exception()
             if exc:
                 logger.error(f"❌ Task '{task.get_name()}' crashed: {exc}", exc_info=exc)
-            else:
-                logger.warning(f"⚠️ Task '{task.get_name()}' finished unexpectedly")
 
         for task in pending:
             task.cancel()
@@ -107,63 +73,27 @@ class TradingBot:
 
     async def stop(self):
         logger.info("🛑 Shutting down...")
-        for name, component in [
-            ("telegram", self.telegram_bot),
-            ("strategy", self.strategy_manager),
-            ("reporting", self.reporting),
-            ("data", self.market_data),
-        ]:
-            if component is None:
-                continue
+        for name, component in [("telegram", self.telegram_bot), ("strategy", self.strategy_manager), ("reporting", self.reporting), ("data", self.market_data)]:
+            if component is None: continue
             try:
                 stop_fn = getattr(component, "stop", None) or getattr(component, "close", None)
                 if stop_fn:
                     result = stop_fn()
-                    if asyncio.iscoroutine(result):
-                        await result
-                    logger.info(f"✅ {name} stopped")
+                    if asyncio.iscoroutine(result): await result
             except Exception as e:
                 logger.error(f"Error stopping {name}: {e}")
-        logger.info("✅ Shutdown complete")
 
 async def main():
     setup_logging()
-    test_tmp_persistence()
+    
+    bot = TradingBot()
+    try:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, lambda s=sig: bot.shutdown_event.set())
+    except: pass
 
-    max_restarts = int(os.getenv("MAX_RESTARTS", "5"))
-    restart_count = 0
-    backoff_steps = [10, 30, 60, 120, 300]
-
-    while restart_count < max_restarts:
-        bot = TradingBot()
-
-        def handle_signal(signum):
-            logger.info(f"📴 Received signal {signum}, shutting down...")
-            bot.running = False
-            bot.shutdown_event.set()
-
-        try:
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
-        except (NotImplementedError, RuntimeError) as e:
-            logger.warning(f"Could not set signal handlers: {e}")
-
-        try:
-            await bot.start()
-            logger.info("👋 Bot shut down gracefully, exiting")
-            break
-        except Exception as e:
-            restart_count += 1
-            logger.error(f"💥 Bot crashed (attempt {restart_count}/{max_restarts}): {e}", exc_info=True)
-            if restart_count >= max_restarts:
-                logger.critical(f"❌ Max restarts reached. Giving up.")
-                break
-            delay = backoff_steps[min(restart_count - 1, len(backoff_steps) - 1)]
-            logger.info(f"⏳ Restarting in {delay}s...")
-            await asyncio.sleep(delay)
-
-    logger.info("👋 Bot process exiting")
+    await bot.start()
 
 if __name__ == "__main__":
     asyncio.run(main())
