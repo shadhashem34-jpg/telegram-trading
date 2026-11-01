@@ -1,5 +1,6 @@
 """
 bot.py - Main orchestrator for the trading bot.
+Fixed imports, paths, and exact class signatures.
 """
 import asyncio
 import signal
@@ -8,50 +9,19 @@ import os
 import sys
 from datetime import datetime
 
-# ── FIX: Add paths for Deplexo ──
+# ── FIX: Add src to path so files inside src can find 'logger' and 'database' ──
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 sys.path.insert(0, os.path.join(current_dir, "src"))
 
 from dotenv import load_dotenv
 
-# ── FIX: Safe imports ──
-try:
-    from src.telegram_handler import TelegramBot
-except ImportError:
-    from telegram_handler import TelegramBot
-
-try:
-    from src.strategy import StrategyManager
-except ImportError:
-    from strategy import StrategyManager
-
-try:
-    from src.data_handler import MarketDataHandler
-except ImportError:
-    from data_handler import MarketDataHandler
-
-try:
-    from src.reporting import ReportingSystem
-except ImportError:
-    from reporting import ReportingSystem
-
-try:
-    from src.logger import setup_logging
-except ImportError:
-    from logger import setup_logging
-
-# ── FIX: Dummy Database ──
-class Database:
-    def __init__(self, *args, **kwargs): pass
-    def __getattr__(self, name):
-        def method(*args, **kwargs):
-            class DummyAwaitable:
-                def __await__(self):
-                    yield
-                    return None
-            return DummyAwaitable()
-        return method
+# ── FIX: Import directly since src is now in sys.path ──
+from telegram_handler import TelegramBot
+from strategy import StrategyManager
+from data_handler import MarketDataHandler
+from reporting import ReportingSystem
+from logger import setup_logging
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -73,26 +43,22 @@ class TradingBot:
     def __init__(self):
         self.shutdown_event = asyncio.Event()
         self.running = False
-        self.database = None
         self.market_data = None
         self.strategy_manager = None
         self.telegram_bot = None
         self.reporting = None
 
     async def initialize(self):
-        # 1. Database
-        self.database = Database() 
-        
-        # 2. Market Data
+        # 1. Market Data
         self.market_data = MarketDataHandler()
         
-        # 3. Strategy Manager (Based on logs, this takes 2 args)
-        self.strategy_manager = StrategyManager(self.market_data, self.database)
+        # 2. Strategy Manager (Takes 0 arguments based on your file)
+        self.strategy_manager = StrategyManager()
         
-        # 4. Reporting (Based on logs, this takes 1 arg)
-        self.reporting = ReportingSystem(self.database)
+        # 3. Reporting (Assuming it takes 0 args, if it errors we can fix later)
+        self.reporting = ReportingSystem()
 
-        # 5. Telegram Bot (Based on logs, it takes exactly 3 args: market_data, strategy_manager, reporting)
+        # 4. Telegram Bot (Takes exactly 3 args: market_data, strategy_manager, reporting)
         self.telegram_bot = TelegramBot(
             self.market_data, 
             self.strategy_manager, 
@@ -146,7 +112,6 @@ class TradingBot:
             ("strategy", self.strategy_manager),
             ("reporting", self.reporting),
             ("data", self.market_data),
-            ("database", self.database),
         ]:
             if component is None:
                 continue
