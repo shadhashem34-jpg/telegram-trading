@@ -3,7 +3,6 @@ import signal
 import logging
 import os
 import sys
-from datetime import datetime
 
 # ── FIX: Add src to path ──
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,21 +31,26 @@ class TradingBot:
     async def initialize(self):
         self.market_data = MarketDataHandler()
         self.strategy_manager = StrategyManager()
-        self.reporting = ReportingSystem()
         
+        # Reporting System ممکنه ورودی بخواد یا نخواد، هندلش میکنیم
+        try:
+            self.reporting = ReportingSystem()
+        except:
+            self.reporting = None
+            
         self.telegram_bot = TelegramBot(self.market_data, self.strategy_manager, self.reporting)
         
-        # 🚀 این دو خط جادویی، استراتژی و تلگرام رو به هم وصل میکنه
+        # 🚀 اتصال استراتژی به تلگرام و بازار
         self.strategy_manager.telegram_bot = self.telegram_bot
         self.strategy_manager.market_data = self.market_data
             
         logger.info("✅ All components connected successfully")
 
     async def run_components(self):
+        # فقط کامپوننت‌هایی که متد start دارن اجرا میشن (Reporting رو حذف کردیم چون start نداره)
         tasks = [
             asyncio.create_task(self.telegram_bot.start(), name="telegram"),
             asyncio.create_task(self.strategy_manager.start_monitoring(), name="strategy"),
-            asyncio.create_task(self.reporting.start(), name="reporting"),
             asyncio.create_task(self.market_data.start_data_collection(), name="data"),
         ]
 
@@ -73,13 +77,15 @@ class TradingBot:
 
     async def stop(self):
         logger.info("🛑 Shutting down...")
-        for name, component in [("telegram", self.telegram_bot), ("strategy", self.strategy_manager), ("reporting", self.reporting), ("data", self.market_data)]:
+        # فقط کامپوننت‌های فعال رو خاموش میکنیم
+        for name, component in [("telegram", self.telegram_bot), ("strategy", self.strategy_manager), ("data", self.market_data)]:
             if component is None: continue
             try:
                 stop_fn = getattr(component, "stop", None) or getattr(component, "close", None)
                 if stop_fn:
                     result = stop_fn()
-                    if asyncio.iscoroutine(result): await result
+                    if asyncio.iscoroutine(result): 
+                        await result
             except Exception as e:
                 logger.error(f"Error stopping {name}: {e}")
 
@@ -91,7 +97,8 @@ async def main():
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda s=sig: bot.shutdown_event.set())
-    except: pass
+    except: 
+        pass
 
     await bot.start()
 
