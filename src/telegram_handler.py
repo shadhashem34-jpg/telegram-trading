@@ -65,6 +65,17 @@ class TelegramBot:
                 
                 logger.log_system_event("✅ Bot is live and polling for updates.")
                 
+                # 🚀 ارسال پیام استارت به تلگرام
+                if self.chat_id:
+                    try:
+                        await self.application.bot.send_message(
+                            chat_id=self.chat_id,
+                            text="🤖 Trading Bot Started\n\n✅ System initialized\n📊 Ready to generate signals\n\nUse /help for available commands"
+                        )
+                        logger.log_system_event("Startup message sent successfully.")
+                    except Exception as msg_err:
+                        logger.log_system_event(f"Could not send startup message: {msg_err}")
+                
                 while self.running and self.application.updater.running:
                     await asyncio.sleep(5)
                     
