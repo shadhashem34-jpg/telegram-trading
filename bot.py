@@ -80,47 +80,29 @@ class TradingBot:
         self.reporting = None
 
     async def initialize(self):
+        # 1. Database
         self.database = Database() 
         
-        # 1. Market Data
-        try:
-            self.market_data = MarketDataHandler()
-        except Exception as e:
-            logger.error(f"MarketData error: {e}")
-            self.market_data = None
+        # 2. Market Data
+        self.market_data = MarketDataHandler()
+        
+        # 3. Strategy Manager (Based on logs, this takes 2 args)
+        self.strategy_manager = StrategyManager(self.market_data, self.database)
+        
+        # 4. Reporting (Based on logs, this takes 1 arg)
+        self.reporting = ReportingSystem(self.database)
 
-        # 2. Strategy Manager (Try all argument combinations)
-        try:
-            self.strategy_manager = StrategyManager(self.market_data, self.database)
-        except TypeError:
-            try:
-                self.strategy_manager = StrategyManager(self.market_data)
-            except TypeError:
-                self.strategy_manager = StrategyManager()
-
-        # 3. Reporting
-        try:
-            self.reporting = ReportingSystem(self.database)
-        except TypeError:
-            self.reporting = ReportingSystem()
-
-        # 4. Telegram Bot (Try all argument combinations)
-        try:
-            self.telegram_bot = TelegramBot(self.strategy_manager, self.market_data, self.reporting, self.database)
-        except TypeError:
-            try:
-                self.telegram_bot = TelegramBot(self.strategy_manager, self.database)
-            except TypeError:
-                try:
-                    self.telegram_bot = TelegramBot(self.strategy_manager)
-                except TypeError:
-                    self.telegram_bot = TelegramBot()
+        # 5. Telegram Bot (Based on logs, it takes exactly 3 args: market_data, strategy_manager, reporting)
+        self.telegram_bot = TelegramBot(
+            self.market_data, 
+            self.strategy_manager, 
+            self.reporting
+        )
             
         logger.info("✅ All components initialized successfully")
 
     async def run_components(self):
         tasks = []
-        # Only run components that actually exist and have a start method
         if self.telegram_bot and hasattr(self.telegram_bot, 'start'):
             tasks.append(asyncio.create_task(self.telegram_bot.start(), name="telegram"))
         if self.strategy_manager and hasattr(self.strategy_manager, 'start_monitoring'):
