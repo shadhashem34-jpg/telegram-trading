@@ -25,23 +25,31 @@ class TelegramBot:
         self.running = False
 
     async def send_signal(self, signal: dict):
-        """فرستادن سیگنال به تلگرام"""
+        """فرستادن سیگنال به تلگرام با قابلیت تلاش مجدد (Retry)"""
         if not self.application or not self.chat_id:
             logger.log_system_event("⚠️ Cannot send signal: App not ready or chat_id missing")
-            return
-        try:
-            text = (
-                f"🚨 **SIGNAL: {signal.get('symbol')}**\n\n"
-                f"📈 Type: {signal.get('type')}\n"
-                f"💰 Entry: {signal.get('entry_price')}\n"
-                f"🛑 SL: {signal.get('stop_loss')}\n"
-                f"🎯 TP1: {signal.get('take_profit_1')}\n"
-                f"🎯 TP2: {signal.get('take_profit_2')}\n"
-            )
-            await self.application.bot.send_message(chat_id=self.chat_id, text=text, parse_mode='Markdown')
-            logger.log_system_event(f"✅ Signal sent to Telegram for {signal.get('symbol')}")
-        except Exception as e:
-            logger.log_system_event(f"❌ Error sending signal: {e}")
+            return False
+            
+        text = (
+            f"🚨 **SIGNAL: {signal.get('symbol')}**\n\n"
+            f"📈 Type: {signal.get('type')}\n"
+            f"💰 Entry: {signal.get('entry_price')}\n"
+            f"🛑 SL: {signal.get('stop_loss')}\n"
+            f"🎯 TP1: {signal.get('take_profit_1')}\n"
+            f"🎯 TP2: {signal.get('take_profit_2')}\n"
+        )
+        
+        # ۳ بار تلاش میکنیم اگه اینترنت قطع شد
+        for attempt in range(3):
+            try:
+                await self.application.bot.send_message(chat_id=self.chat_id, text=text, parse_mode='Markdown')
+                logger.log_system_event(f"✅ Signal successfully sent to Telegram for {signal.get('symbol')}")
+                return True
+            except Exception as e:
+                logger.log_system_event(f"❌ Attempt {attempt+1} failed to send signal: {e}")
+                await asyncio.sleep(5) # ۵ ثانیه صبر میکنیم و دوباره تلاش میکنیم
+                
+        return False
 
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🤖 Trading Bot is running and scanning for signals.")
@@ -70,7 +78,10 @@ class TelegramBot:
                 logger.log_system_event("✅ Bot is live and polling for updates.")
                 
                 if self.chat_id:
-                    await self.application.bot.send_message(chat_id=self.chat_id, text="🤖 Trading Bot Started\n✅ Ready to scan for signals.")
+                    try:
+                        await self.application.bot.send_message(chat_id=self.chat_id, text="🤖 Trading Bot Started\n✅ Ready to scan for signals.")
+                    except Exception:
+                        pass
                 
                 while self.running and self.application.updater.running:
                     await asyncio.sleep(5)
