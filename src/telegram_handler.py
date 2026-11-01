@@ -29,45 +29,62 @@ class TelegramBot:
         await update.message.reply_text("I received your message. Use /help to see available commands.")
 
     async def start(self):
-        logger.log_system_event("Starting Telegram Bot...")
-        self.application = Application.builder().token(self.token).build()
-        self.application.add_handler(CommandHandler("start", self.start_command))
-        self.application.add_handler(CommandHandler("help", self.help_command))
-        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
-
-        logger.log_system_event("Clearing old Telegram webhooks to prevent Conflict...")
-        await self.application.bot.delete_webhook(drop_pending_updates=True)
-        
-        await self.application.initialize()
-        await self.application.start()
-        
         self.running = True
-        
-        # 🛡️ حلقه ضدضربه: اگر اینترنت قطع شد، خودش دوباره وصل می‌شود
         while self.running:
             try:
-                logger.log_system_event("Attempting to start polling...")
-                await self.application.updater.start_polling(
-                    drop_pending_updates=True,
-                    allowed_updates=Update.ALL_TYPES
+                logger.log_system_event("Building Telegram Application...")
+                # هر بار از صفر ساخته میشه تا هیچ حافظه‌ای خراب نمونه
+                self.application = (
+                    Application.builder()
+                    .token(self.token)
+                    .read_timeout(60)
+                    .write_timeout(60)
+                    .connect_timeout(60)
+                    .pool_timeout(60)
+                    .build()
                 )
-                # تا وقتی پولینگ فعاله، برنامه رو زنده نگه دار
+                
+                self.application.add_handler(CommandHandler("start", self.start_command))
+                self.application.add_handler(CommandHandler("help", self.help_command))
+                self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+
+                logger.log_system_event("Clearing old Telegram webhooks...")
+                try:
+                    await self.application.bot.delete_webhook(drop_pending_updates=True)
+                except Exception as e:
+                    logger.log_system_event(f"Webhook deletion warning: {e}")
+
+                logger.log_system_event("Initializing and starting polling...")
+                await self.application.initialize()
+                await self.application.start()
+                
+                # تایم‌اوت ۶۰ ثانیه‌ای برای دریافت پیام‌ها
+                await self.application.updater.start_polling(
+                    drop_pending_updates=True, 
+                    allowed_updates=Update.ALL_TYPES,
+                    timeout=60
+                )
+                
+                logger.log_system_event("✅ Bot is live and polling for updates.")
+                
                 while self.running and self.application.updater.running:
                     await asyncio.sleep(5)
                     
-            except telegram.error.NetworkError as e:
-                logger.log_system_event(f"⚠️ Network Error: {e}. Reconnecting in 10 seconds...")
-                await asyncio.sleep(10)
             except Exception as e:
-                logger.log_system_event(f"⚠️ Unexpected error in polling: {e}. Reconnecting in 10 seconds...")
-                await asyncio.sleep(10)
+                logger.log_system_event(f"⚠️ Telegram connection error: {e}. Retrying in 5 seconds...")
+                await asyncio.sleep(5)
+            finally:
+                # پاکسازی کامل قبل از تلاش بعدی
+                if self.application:
+                    try:
+                        if self.application.updater.running:
+                            await self.application.updater.stop()
+                        if self.application.running:
+                            await self.application.stop()
+                            await self.application.shutdown()
+                    except Exception:
+                        pass
+                    self.application = None
 
     async def stop(self):
         self.running = False
-        if self.application:
-            try:
-                await self.application.updater.stop()
-                await self.application.stop()
-                await self.application.shutdown()
-            except Exception:
-                pass
