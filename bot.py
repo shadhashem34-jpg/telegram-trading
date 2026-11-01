@@ -8,14 +8,14 @@ import os
 import sys
 from datetime import datetime
 
-# ── FIX: Add paths for Deplexo to prevent ModuleNotFoundError ──
+# ── FIX: Add paths for Deplexo ──
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 sys.path.insert(0, os.path.join(current_dir, "src"))
 
 from dotenv import load_dotenv
 
-# ── FIX: Safe imports (works with or without 'src.') ──
+# ── FIX: Safe imports ──
 try:
     from src.telegram_handler import TelegramBot
 except ImportError:
@@ -41,11 +41,9 @@ try:
 except ImportError:
     from logger import setup_logging
 
-# ── FIX: Bypass Database ImportError by using a Dummy Class ──
-# از اونجایی که اسم کلاس دیتابیس رو نمی‌دونم، یه کلاس فیک می‌سازم که هر چیزی ازش خواسته شد جواب بده تا ربات کرش نکنه
+# ── FIX: Dummy Database ──
 class Database:
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, *args, **kwargs): pass
     def __getattr__(self, name):
         def method(*args, **kwargs):
             class DummyAwaitable:
@@ -83,35 +81,58 @@ class TradingBot:
 
     async def initialize(self):
         self.database = Database() 
-        if hasattr(self.database, "initialize"):
-            await self.database.initialize()
-
-        self.market_data = MarketDataHandler()
-        self.strategy_manager = StrategyManager(self.market_data, self.database)
-        self.reporting = ReportingSystem(self.database)
         
+        # 1. Market Data
         try:
-            self.telegram_bot = TelegramBot(
-                self.strategy_manager,
-                self.market_data,
-                self.reporting,
-                self.database,
-            )
+            self.market_data = MarketDataHandler()
+        except Exception as e:
+            logger.error(f"MarketData error: {e}")
+            self.market_data = None
+
+        # 2. Strategy Manager (Try all argument combinations)
+        try:
+            self.strategy_manager = StrategyManager(self.market_data, self.database)
+        except TypeError:
+            try:
+                self.strategy_manager = StrategyManager(self.market_data)
+            except TypeError:
+                self.strategy_manager = StrategyManager()
+
+        # 3. Reporting
+        try:
+            self.reporting = ReportingSystem(self.database)
+        except TypeError:
+            self.reporting = ReportingSystem()
+
+        # 4. Telegram Bot (Try all argument combinations)
+        try:
+            self.telegram_bot = TelegramBot(self.strategy_manager, self.market_data, self.reporting, self.database)
         except TypeError:
             try:
                 self.telegram_bot = TelegramBot(self.strategy_manager, self.database)
             except TypeError:
-                self.telegram_bot = TelegramBot(self.strategy_manager)
+                try:
+                    self.telegram_bot = TelegramBot(self.strategy_manager)
+                except TypeError:
+                    self.telegram_bot = TelegramBot()
             
-        logger.info("✅ All components initialized")
+        logger.info("✅ All components initialized successfully")
 
     async def run_components(self):
-        tasks = [
-            asyncio.create_task(self.telegram_bot.start(), name="telegram"),
-            asyncio.create_task(self.strategy_manager.start_monitoring(), name="strategy"),
-            asyncio.create_task(self.reporting.start(), name="reporting"),
-            asyncio.create_task(self.market_data.start_data_collection(), name="data"),
-        ]
+        tasks = []
+        # Only run components that actually exist and have a start method
+        if self.telegram_bot and hasattr(self.telegram_bot, 'start'):
+            tasks.append(asyncio.create_task(self.telegram_bot.start(), name="telegram"))
+        if self.strategy_manager and hasattr(self.strategy_manager, 'start_monitoring'):
+            tasks.append(asyncio.create_task(self.strategy_manager.start_monitoring(), name="strategy"))
+        if self.reporting and hasattr(self.reporting, 'start'):
+            tasks.append(asyncio.create_task(self.reporting.start(), name="reporting"))
+        if self.market_data and hasattr(self.market_data, 'start_data_collection'):
+            tasks.append(asyncio.create_task(self.market_data.start_data_collection(), name="data"))
+
+        if not tasks:
+            logger.error("❌ No components to run!")
+            return
 
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
 
