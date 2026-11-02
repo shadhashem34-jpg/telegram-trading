@@ -21,7 +21,7 @@ class StrategyManager:
         logger.log_system_event("Strategy Monitoring Started...")
         
         symbols = [
-            "XAUUSD", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
+            "XAUUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
             "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT", 
             "LTCUSDT", "BCHUSDT", "TRXUSDT", "UNIUSDT", "ATOMUSDT", 
             "ETCUSDT", "FILUSDT", "APTUSDT", "SUIUSDT", "ARBUSDT", 
@@ -120,7 +120,8 @@ class StrategyManager:
 
         # ۳. نهایی‌سازی سیگنال و مدیریت ریسک
         if signal_type:
-            if symbol != "XAUUSD":
+            # فیلتر همبستگی (طلا از این قانون مستثنی است)
+            if symbol != "XAUUSDT":
                 if self.last_crypto_signal_time:
                     c_time_diff = (now - self.last_crypto_signal_time).total_seconds() / 3600
                     if c_time_diff < 4: return None
@@ -139,7 +140,7 @@ class StrategyManager:
                 stop_loss = m30_close + sl_distance
                 tp1 = m30_close - (sl_distance * 1.5)
 
-            if symbol != "XAUUSD": self.last_crypto_signal_time = now
+            if symbol != "XAUUSDT": self.last_crypto_signal_time = now
             self.signals_today += 1
             
             signal = {
