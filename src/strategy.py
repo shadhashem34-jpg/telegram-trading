@@ -41,8 +41,8 @@ class StrategyManager:
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
                 
-                # 🛠️ FIX: Increased delay to 1.5s to prevent Deplexo DNS/Network overload
-                await asyncio.sleep(1.5) 
+                # 🛠️ FIX: Increased delay to 4 seconds to prevent Bybit API Rate Limit (ErrCode: 10006)
+                await asyncio.sleep(4) 
             
             await asyncio.sleep(60)
 
@@ -83,7 +83,6 @@ class StrategyManager:
         ema_20_h1 = h1.get('ema_20', 0)
         now = datetime.now(timezone.utc)
 
-        # ۱. تشخیص شکست با بدنه (Body Breakout)
         if is_uptrend and m30_close > m30_open and m30_close > m30.get('high_5', 0):
             self.watchlist[symbol] = {'type': 'BUY', 'level': m30.get('high_5', 0), 'time': now}
             logger.log_system_event(f"📝 Breakout UP registered for {symbol}. Waiting for pullback...")
@@ -94,7 +93,6 @@ class StrategyManager:
             logger.log_system_event(f"📝 Breakout DOWN registered for {symbol}. Waiting for pullback...")
             return None
 
-        # ۲. بررسی پولبک و ورود
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
@@ -121,7 +119,6 @@ class StrategyManager:
             else: return None
         else: return None
 
-        # ۳. نهایی‌سازی سیگنال و مدیریت ریسک
         if signal_type:
             if symbol != "XAUUSDT":
                 if self.last_crypto_signal_time:
