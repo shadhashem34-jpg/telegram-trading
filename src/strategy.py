@@ -40,7 +40,10 @@ class StrategyManager:
                                     await self.telegram_bot.send_signal(signal)
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
-                await asyncio.sleep(0.5)
+                
+                # 🛠️ FIX: Increased delay to 1.5s to prevent Deplexo DNS/Network overload
+                await asyncio.sleep(1.5) 
+            
             await asyncio.sleep(60)
 
     async def stop(self):
@@ -120,7 +123,6 @@ class StrategyManager:
 
         # ۳. نهایی‌سازی سیگنال و مدیریت ریسک
         if signal_type:
-            # فیلتر همبستگی (طلا از این قانون مستثنی است)
             if symbol != "XAUUSDT":
                 if self.last_crypto_signal_time:
                     c_time_diff = (now - self.last_crypto_signal_time).total_seconds() / 3600
