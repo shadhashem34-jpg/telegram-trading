@@ -7,8 +7,9 @@ logger = get_trading_logger()
 class MarketDataHandler:
     def __init__(self):
         self.session = HTTP(testnet=False)
+        # نماد طلا در بای‌بیت XAUUSDT است، نه XAUUSD
         self.symbols = [
-            "XAUUSD", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
+            "XAUUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
             "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT", 
             "LTCUSDT", "BCHUSDT", "TRXUSDT", "UNIUSDT", "ATOMUSDT", 
             "ETCUSDT", "FILUSDT", "APTUSDT", "SUIUSDT", "ARBUSDT", 
@@ -62,12 +63,12 @@ class MarketDataHandler:
 
     async def get_market_data(self, symbol):
         try:
-            category = "linear" if "USDT" in symbol else "inverse"
-            actual_symbol = symbol if symbol != "XAUUSD" else "XAUUSD"
+            # همه نمادها در بای‌بیت از نوع linear (پیرپچوال) هستند
+            category = "linear"
             
-            kline_4h = self.session.get_kline(category=category, symbol=actual_symbol, interval="240", limit=200)['result']['list']
-            kline_1h = self.session.get_kline(category=category, symbol=actual_symbol, interval="60", limit=200)['result']['list']
-            kline_30m = self.session.get_kline(category=category, symbol=actual_symbol, interval="30", limit=200)['result']['list']
+            kline_4h = self.session.get_kline(category=category, symbol=symbol, interval="240", limit=200)['result']['list']
+            kline_1h = self.session.get_kline(category=category, symbol=symbol, interval="60", limit=200)['result']['list']
+            kline_30m = self.session.get_kline(category=category, symbol=symbol, interval="30", limit=200)['result']['list']
 
             # 🚨 FIX: Drop the current unclosed candle
             kline_4h = kline_4h[1:] 
