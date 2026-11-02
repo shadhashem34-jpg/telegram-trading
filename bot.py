@@ -3,6 +3,13 @@ import signal
 import logging
 import os
 import sys
+import socket
+
+# ── 🛠️ FIX: Force IPv4 Globally for Deplexo (Fixes Bybit & Telegram DNS Errors) ──
+_original_getaddrinfo = socket.getaddrinfo
+def _getaddrinfo_ipv4(host, port, family=0, type=0, proto=0, flags=0):
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _getaddrinfo_ipv4
 
 # ── FIX: Add src to path ──
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,7 +39,6 @@ class TradingBot:
         self.market_data = MarketDataHandler()
         self.strategy_manager = StrategyManager()
         
-        # Reporting System ممکنه ورودی بخواد یا نخواد، هندلش میکنیم
         try:
             self.reporting = ReportingSystem()
         except:
@@ -47,7 +53,6 @@ class TradingBot:
         logger.info("✅ All components connected successfully")
 
     async def run_components(self):
-        # فقط کامپوننت‌هایی که متد start دارن اجرا میشن (Reporting رو حذف کردیم چون start نداره)
         tasks = [
             asyncio.create_task(self.telegram_bot.start(), name="telegram"),
             asyncio.create_task(self.strategy_manager.start_monitoring(), name="strategy"),
@@ -77,7 +82,6 @@ class TradingBot:
 
     async def stop(self):
         logger.info("🛑 Shutting down...")
-        # فقط کامپوننت‌های فعال رو خاموش میکنیم
         for name, component in [("telegram", self.telegram_bot), ("strategy", self.strategy_manager), ("data", self.market_data)]:
             if component is None: continue
             try:
