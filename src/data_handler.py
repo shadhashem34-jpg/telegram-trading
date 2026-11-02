@@ -7,7 +7,6 @@ logger = get_trading_logger()
 class MarketDataHandler:
     def __init__(self):
         self.session = HTTP(testnet=False)
-        # نماد طلا در بای‌بیت XAUUSDT است، نه XAUUSD
         self.symbols = [
             "XAUUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", 
             "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "DOGEUSDT", 
@@ -63,56 +62,58 @@ class MarketDataHandler:
 
     async def get_market_data(self, symbol):
         try:
-            # همه نمادها در بای‌بیت از نوع linear (پیرپچوال) هستند
             category = "linear"
             
-            kline_4h = self.session.get_kline(category=category, symbol=symbol, interval="240", limit=200)['result']['list']
-            kline_1h = self.session.get_kline(category=category, symbol=symbol, interval="60", limit=200)['result']['list']
+            # 🚀 NEW TIMEFRAMES: 2H (120), 30M, 15M
+            kline_2h = self.session.get_kline(category=category, symbol=symbol, interval="120", limit=200)['result']['list']
             kline_30m = self.session.get_kline(category=category, symbol=symbol, interval="30", limit=200)['result']['list']
+            kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=200)['result']['list']
 
-            # 🚨 FIX: Drop the current unclosed candle
-            kline_4h = kline_4h[1:] 
-            kline_1h = kline_1h[1:]
+            # Drop unclosed candles
+            kline_2h = kline_2h[1:] 
             kline_30m = kline_30m[1:]
+            kline_15m = kline_15m[1:]
 
-            k4h = kline_4h[::-1]
-            k1h = kline_1h[::-1]
+            k2h = kline_2h[::-1]
             k30m = kline_30m[::-1]
+            k15m = kline_15m[::-1]
 
-            if not k4h or not k1h or not k30m: return None
+            if not k2h or not k30m or not k15m: return None
 
-            h4_closes = [float(k[4]) for k in k4h]
-            h4_highs = [float(k[2]) for k in k4h]
-            h4_lows = [float(k[3]) for k in k4h]
-            ema_200_4h = self._calculate_ema(h4_closes, 200)
-            adx_4h = self._calculate_adx(h4_highs, h4_lows, h4_closes)
-            atr_4h = self._calculate_atr(h4_highs, h4_lows, h4_closes)
+            # 2H Data
+            h2_closes = [float(k[4]) for k in k2h]
+            h2_highs = [float(k[2]) for k in k2h]
+            h2_lows = [float(k[3]) for k in k2h]
+            ema_200_2h = self._calculate_ema(h2_closes, 200)
+            adx_2h = self._calculate_adx(h2_highs, h2_lows, h2_closes)
             
-            h1_closes = [float(k[4]) for k in k1h]
-            h1_highs = [float(k[2]) for k in k1h]
-            h1_lows = [float(k[3]) for k in k1h]
-            ema_20_1h = self._calculate_ema(h1_closes, 20)
-            atr_1h = self._calculate_atr(h1_highs, h1_lows, h1_closes)
-            
-            m30_opens = [float(k[1]) for k in k30m]
+            # 30M Data
             m30_closes = [float(k[4]) for k in k30m]
             m30_highs = [float(k[2]) for k in k30m]
             m30_lows = [float(k[3]) for k in k30m]
-            m30_volumes = [float(k[5]) for k in k30m]
+            ema_20_30m = self._calculate_ema(m30_closes, 20)
+            atr_30m = self._calculate_atr(m30_highs, m30_lows, m30_closes)
+            
+            # 15M Data
+            m15_opens = [float(k[1]) for k in k15m]
+            m15_closes = [float(k[4]) for k in k15m]
+            m15_highs = [float(k[2]) for k in k15m]
+            m15_lows = [float(k[3]) for k in k15m]
 
             return {
-                'h4': {
-                    'close': h4_closes[-1], 'ema_200': ema_200_4h, 'adx': adx_4h, 'atr': atr_4h,
-                    'high_100': max(h4_highs[-100:]), 'low_100': min(h4_lows[-100:])
-                },
-                'h1': {
-                    'close': h1_closes[-1], 'ema_20': ema_20_1h, 'atr': atr_1h,
-                    'high_20': max(h1_highs[-20:]), 'low_20': min(h1_lows[-20:])
+                'h2': {
+                    'close': h2_closes[-1], 'ema_200': ema_200_2h, 'adx': adx_2h,
+                    'high_100': max(h2_highs[-100:]), 'low_100': min(h2_lows[-100:])
                 },
                 'm30': {
-                    'open': m30_opens[-1], 'close': m30_closes[-1], 'high': m30_highs[-1], 'low': m30_lows[-1],
-                    'high_5': max(m30_highs[-6:-1]), 'low_5': min(m30_lows[-6:-1]),   
-                    'volume': m30_volumes[-1], 'volume_avg_20': sum(m30_volumes[-20:]) / 20
+                    'close': m30_closes[-1], 'ema_20': ema_20_30m, 'atr': atr_30m,
+                    'high_5': max(m30_highs[-6:-1]), 'low_5': min(m30_lows[-6:-1]),
+                    'swing_low': min(m30_lows[-3:]),  # برای محاسبه SL
+                    'swing_high': max(m30_highs[-3:]) # برای محاسبه SL
+                },
+                'm15': {
+                    'open': m15_opens[-1], 'close': m15_closes[-1], 
+                    'high': m15_highs[-1], 'low': m15_lows[-1]
                 }
             }
         except Exception as e:
