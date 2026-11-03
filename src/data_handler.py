@@ -64,12 +64,11 @@ class MarketDataHandler:
         try:
             category = "linear"
             
-            # 🚀 NEW TIMEFRAMES: 2H (120), 30M, 15M
             kline_2h = self.session.get_kline(category=category, symbol=symbol, interval="120", limit=200)['result']['list']
             kline_30m = self.session.get_kline(category=category, symbol=symbol, interval="30", limit=200)['result']['list']
             kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=200)['result']['list']
 
-            # Drop unclosed candles
+            # Drop unclosed candles to prevent fake signals
             kline_2h = kline_2h[1:] 
             kline_30m = kline_30m[1:]
             kline_15m = kline_15m[1:]
@@ -91,29 +90,36 @@ class MarketDataHandler:
             m30_closes = [float(k[4]) for k in k30m]
             m30_highs = [float(k[2]) for k in k30m]
             m30_lows = [float(k[3]) for k in k30m]
+            m30_vols = [float(k[5]) for k in k30m]
             ema_20_30m = self._calculate_ema(m30_closes, 20)
             atr_30m = self._calculate_atr(m30_highs, m30_lows, m30_closes)
             
             # 15M Data
-            m15_opens = [float(k[1]) for k in k15m]
             m15_closes = [float(k[4]) for k in k15m]
             m15_highs = [float(k[2]) for k in k15m]
             m15_lows = [float(k[3]) for k in k15m]
+            atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
 
             return {
                 'h2': {
                     'close': h2_closes[-1], 'ema_200': ema_200_2h, 'adx': adx_2h,
-                    'high_100': max(h2_highs[-100:]), 'low_100': min(h2_lows[-100:])
                 },
                 'm30': {
-                    'close': m30_closes[-1], 'ema_20': ema_20_30m, 'atr': atr_30m,
-                    'high_5': max(m30_highs[-6:-1]), 'low_5': min(m30_lows[-6:-1]),
-                    'swing_low': min(m30_lows[-3:]),  # برای محاسبه SL
-                    'swing_high': max(m30_highs[-3:]) # برای محاسبه SL
+                    'close': m30_closes[-1], 
+                    'high_10': max(m30_highs[-11:-1]), 
+                    'low_10': min(m30_lows[-11:-1]),
+                    'swing_low': min(m30_lows[-3:]),   # برای حد ضرر ساختاری
+                    'swing_high': max(m30_highs[-3:]), # برای حد ضرر ساختاری
+                    'ema_20': ema_20_30m,
+                    'atr': atr_30m,
+                    'volume': m30_vols[-1],
+                    'volume_avg_20': sum(m30_vols[-21:-1]) / 20 # میانگین 20 کندل قبلی
                 },
                 'm15': {
-                    'open': m15_opens[-1], 'close': m15_closes[-1], 
-                    'high': m15_highs[-1], 'low': m15_lows[-1]
+                    'close': m15_closes[-1], 
+                    'high': m15_highs[-1], 
+                    'low': m15_lows[-1],
+                    'atr': atr_15m
                 }
             }
         except Exception as e:
