@@ -41,7 +41,8 @@ class StrategyManager:
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
                 
-                await asyncio.sleep(4) 
+                # 🛠️ FIX: Increased to 10 seconds to prevent Bybit API Rate Limit completely
+                await asyncio.sleep(10) 
             
             await asyncio.sleep(60)
 
@@ -82,13 +83,11 @@ class StrategyManager:
         now = datetime.now(timezone.utc)
 
         # ⚡ لایه دوم: شکست با بدنه در تایم 30 دقیقه
-        # خرید: بدنه بالای سقف 5 کندل
         if is_uptrend and m30_close > m30.get('high_5', 0):
             self.watchlist[symbol] = {'type': 'BUY', 'level': m30.get('high_5', 0), 'swing_low': m30.get('swing_low', 0), 'time': now}
             logger.log_system_event(f"📝 30M Breakout UP registered for {symbol}. Waiting for 15M trigger...")
             return None
 
-        # فروش: بدنه زیر کف 5 کندل
         elif is_downtrend and m30_close < m30.get('low_5', 0):
             self.watchlist[symbol] = {'type': 'SELL', 'level': m30.get('low_5', 0), 'swing_high': m30.get('swing_high', 0), 'time': now}
             logger.log_system_event(f"📝 30M Breakout DOWN registered for {symbol}. Waiting for 15M trigger...")
@@ -103,34 +102,29 @@ class StrategyManager:
                 del self.watchlist[symbol]
                 return None
 
-            m15_open = m15.get('open', 0)
             m15_close = m15.get('close', 0)
             m15_high = m15.get('high', 0)
             m15_low = m15.get('low', 0)
 
-            # پولبک برای خرید: قیمت به سطح خورده و بدنه بالای سطح بسته شده
+            # پولبک برای خرید
             if watch['type'] == 'BUY' and is_uptrend:
-                # سایه پایینی به سطح خورده و بدنه بالای سطح بسته شده
                 if m15_low <= watch['level'] and m15_close > watch['level']:
                     if abs(m15_close - ema_20_30m) < (atr_30m * 1.5):
                         signal_type = "BUY"
                         del self.watchlist[symbol]
                         
-                        # محاسبه SL بر اساس ساختار 30M + حاشیه ATR (ضد سایه خوردن)
                         stop_loss = watch['swing_low'] - (atr_30m * 0.5) 
                         take_profit = m15_close + ((m15_close - stop_loss) * 1.5)
                     else: return None
                 else: return None
 
-            # پولبک برای فروش: قیمت به سطح خورده و بدنه زیر سطح بسته شده
+            # پولبک برای فروش
             elif watch['type'] == 'SELL' and is_downtrend:
-                # سایه بالایی به سطح خورده و بدنه زیر سطح بسته شده
                 if m15_high >= watch['level'] and m15_close < watch['level']:
                     if abs(m15_close - ema_20_30m) < (atr_30m * 1.5):
                         signal_type = "SELL"
                         del self.watchlist[symbol]
                         
-                        # محاسبه SL بر اساس ساختار 30M + حاشیه ATR (ضد سایه خوردن)
                         stop_loss = watch['swing_high'] + (atr_30m * 0.5)
                         take_profit = m15_close - ((stop_loss - m15_close) * 1.5)
                     else: return None
