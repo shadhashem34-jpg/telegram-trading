@@ -31,6 +31,16 @@ class DatabaseManager:
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+            # Create table for user interactions just in case
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS interactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    action TEXT,
+                    details TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             conn.commit()
 
     def save_signal(self, signal_data: dict):
@@ -60,7 +70,6 @@ class DatabaseManager:
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
-                # Get today's date in UTC string format YYYY-MM-DD
                 today_date = datetime.now(timezone.utc).strftime('%Y-%m-%d')
                 cursor.execute(
                     "SELECT COUNT(*) as count FROM signals WHERE date(timestamp) = ?", 
@@ -88,9 +97,24 @@ class DatabaseManager:
                     )
                 row = cursor.fetchone()
                 if row:
-                    # Convert string back to datetime object
                     return datetime.strptime(row['timestamp'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc)
                 return None
         except Exception as e:
             logger.log_system_event(f"Database Error (get_last_signal_time): {e}")
             return None
+
+
+# تابعی که telegram_handler.py دنبالش میگشت:
+def log_interaction(user_id=None, action=None, details=None, *args, **kwargs):
+    """لاگ کردن تعاملات کاربران (مثل زدن دکمه‌ها یا ارسال پیام) تا ربات کرش نکند"""
+    try:
+        with sqlite3.connect("trading_bot.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO interactions (user_id, action, details)
+                VALUES (?, ?, ?)
+            ''', (str(user_id), str(action), str(details)))
+            conn.commit()
+    except Exception as e:
+        # اگر لاگ کردن شکست خورد، ربات نباید کرش کند
+        pass
