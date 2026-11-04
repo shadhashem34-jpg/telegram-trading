@@ -60,6 +60,15 @@ class MarketDataHandler:
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
         return dx
 
+    def _find_pivots(self, highs, lows, left=2, right=2):
+        pivot_highs, pivot_lows = [], []
+        for i in range(left, len(highs) - right):
+            is_high = all(highs[i] > highs[i-j] and highs[i] > highs[i+j] for j in range(1, left+1))
+            is_low = all(lows[i] < lows[i-j] and lows[i] < lows[i+j] for j in range(1, left+1))
+            if is_high: pivot_highs.append(highs[i])
+            if is_low: pivot_lows.append(lows[i])
+        return pivot_highs, pivot_lows
+
     async def get_market_data(self, symbol):
         try:
             category = "linear"
@@ -68,7 +77,7 @@ class MarketDataHandler:
             kline_30m = self.session.get_kline(category=category, symbol=symbol, interval="30", limit=200)['result']['list']
             kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=200)['result']['list']
 
-            # Drop unclosed candles to prevent fake signals
+            # Drop unclosed candles
             kline_2h = kline_2h[1:] 
             kline_30m = kline_30m[1:]
             kline_15m = kline_15m[1:]
@@ -86,40 +95,44 @@ class MarketDataHandler:
             ema_200_2h = self._calculate_ema(h2_closes, 200)
             adx_2h = self._calculate_adx(h2_highs, h2_lows, h2_closes)
             
+            # Find 48h-72h Pivots (24 to 36 candles of 2h)
+            recent_h2_highs = h2_highs[-36:]
+            recent_h2_lows = h2_lows[-36:]
+            pivot_highs, pivot_lows = self._find_pivots(recent_h2_highs, recent_h2_lows)
+            
+            if not pivot_highs: pivot_highs = [max(recent_h2_highs)]
+            if not pivot_lows: pivot_lows = [min(recent_h2_lows)]
+
             # 30M Data
             m30_closes = [float(k[4]) for k in k30m]
-            m30_highs = [float(k[2]) for k in k30m]
-            m30_lows = [float(k[3]) for k in k30m]
-            m30_vols = [float(k[5]) for k in k30m]
             ema_20_30m = self._calculate_ema(m30_closes, 20)
-            atr_30m = self._calculate_atr(m30_highs, m30_lows, m30_closes)
+            atr_30m = self._calculate_atr([float(k[2]) for k in k30m], [float(k[3]) for k in k30m], m30_closes)
             
             # 15M Data
             m15_closes = [float(k[4]) for k in k15m]
             m15_highs = [float(k[2]) for k in k15m]
             m15_lows = [float(k[3]) for k in k15m]
+            m15_vols = [float(k[5]) for k in k15m]
             atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
 
             return {
                 'h2': {
                     'close': h2_closes[-1], 'ema_200': ema_200_2h, 'adx': adx_2h,
+                    'pivot_highs': pivot_highs,
+                    'pivot_lows': pivot_lows
                 },
                 'm30': {
                     'close': m30_closes[-1], 
-                    'high_10': max(m30_highs[-11:-1]), 
-                    'low_10': min(m30_lows[-11:-1]),
-                    'swing_low': min(m30_lows[-3:]),   # برای حد ضرر ساختاری
-                    'swing_high': max(m30_highs[-3:]), # برای حد ضرر ساختاری
                     'ema_20': ema_20_30m,
-                    'atr': atr_30m,
-                    'volume': m30_vols[-1],
-                    'volume_avg_20': sum(m30_vols[-21:-1]) / 20 # میانگین 20 کندل قبلی
+                    'atr': atr_30m
                 },
                 'm15': {
                     'close': m15_closes[-1], 
                     'high': m15_highs[-1], 
                     'low': m15_lows[-1],
-                    'atr': atr_15m
+                    'atr': atr_15m,
+                    'volume': m15_vols[-1],
+                    'volume_avg_20': sum(m15_vols[-21:-1]) / 20
                 }
             }
         except Exception as e:
