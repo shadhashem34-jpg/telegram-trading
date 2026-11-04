@@ -10,7 +10,6 @@ class DatabaseManager:
         self._create_table()
 
     def _get_connection(self):
-        # check_same_thread=False allows the bot to use the DB from different async tasks
         conn = sqlite3.connect(self.db_name, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         return conn
@@ -31,7 +30,6 @@ class DatabaseManager:
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            # Create table for user interactions just in case
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS interactions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +42,6 @@ class DatabaseManager:
             conn.commit()
 
     def save_signal(self, signal_data: dict):
-        """ذخیره سیگنال جدید در دیتابیس"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -58,7 +55,7 @@ class DatabaseManager:
                     signal_data.get('stop_loss'),
                     signal_data.get('take_profit_1'),
                     signal_data.get('take_profit_2', 0),
-                    signal_data.get('strategy', 'Golden_V6')
+                    signal_data.get('strategy', 'Golden_V7.1')
                 ))
                 conn.commit()
                 logger.log_system_event(f"💾 Signal for {signal_data.get('symbol')} saved to database.")
@@ -66,7 +63,6 @@ class DatabaseManager:
             logger.log_system_event(f"Database Error (save_signal): {e}")
 
     def get_today_signal_count(self) -> int:
-        """تعداد سیگنال‌های ارسال شده امروز (به وقت UTC) را برمی‌گرداند"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -82,7 +78,6 @@ class DatabaseManager:
             return 0
 
     def get_last_signal_time(self, symbol: str = None):
-        """زمان آخرین سیگنال را برمی‌گرداند (برای مدیریت فاصله بین سیگنال‌ها)"""
         try:
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -103,10 +98,9 @@ class DatabaseManager:
             logger.log_system_event(f"Database Error (get_last_signal_time): {e}")
             return None
 
-
-# تابعی که telegram_handler.py دنبالش میگشت:
-def log_interaction(user_id=None, action=None, details=None, *args, **kwargs):
-    """لاگ کردن تعاملات کاربران (مثل زدن دکمه‌ها یا ارسال پیام) تا ربات کرش نکند"""
+# 🔴 اینجا کلمه async اضافه شد تا با تلگرام همخوانی داشته باشه 🔴
+async def log_interaction(user_id=None, action=None, details=None, *args, **kwargs):
+    """لاگ کردن تعاملات کاربران به صورت Async تا ربات کرش نکند"""
     try:
         with sqlite3.connect("trading_bot.db") as conn:
             cursor = conn.cursor()
@@ -116,5 +110,4 @@ def log_interaction(user_id=None, action=None, details=None, *args, **kwargs):
             ''', (str(user_id), str(action), str(details)))
             conn.commit()
     except Exception as e:
-        # اگر لاگ کردن شکست خورد، ربات نباید کرش کند
         pass
