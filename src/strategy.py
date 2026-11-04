@@ -41,7 +41,8 @@ class StrategyManager:
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
                 
-                await asyncio.sleep(10) 
+                # افزایش زمان استراحت به ۱۵ ثانیه برای جلوگیری از خطای Rate Limit
+                await asyncio.sleep(15) 
             
             await asyncio.sleep(60)
 
@@ -105,7 +106,7 @@ class StrategyManager:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
             
-            # انقضای ستاپ بعد از ۱۲ ساعت (چون رنج ۱ ساعته دیگه اعتبار نداره)
+            # انقضای ستاپ بعد از ۱۲ ساعت
             if time_diff > 12: 
                 del self.watchlist[symbol]
                 return None
@@ -125,8 +126,8 @@ class StrategyManager:
             level = watch['level']
 
             if watch['type'] == 'BUY' and is_uptrend:
-                # ۱. سایه پایین باید وارد ناحیه شده باشد (m15_low <= zone_top)
-                # ۲. بدنه باید بالای خط اصلی بسته شده باشد (m15_close > level)
+                # ۱. سایه پایین باید وارد ناحیه شده باشد
+                # ۲. بدنه باید بالای خط اصلی بسته شده باشد
                 # ۳. حجم تاییدیه داشته باشد
                 if m15_low <= zone_top and m15_close > level and volume_ok:
                     signal_type = "BUY"
@@ -144,8 +145,8 @@ class StrategyManager:
                 else: return None
 
             elif watch['type'] == 'SELL' and is_downtrend:
-                # ۱. سایه بالا باید وارد ناحیه شده باشد (m15_high >= zone_bottom)
-                # ۲. بدنه باید زیر خط اصلی بسته شده باشد (m15_close < level)
+                # ۱. سایه بالا باید وارد ناحیه شده باشد
+                # ۲. بدنه باید زیر خط اصلی بسته شده باشد
                 # ۳. حجم تاییدیه داشته باشد
                 if m15_high >= zone_bottom and m15_close < level and volume_ok:
                     signal_type = "SELL"
