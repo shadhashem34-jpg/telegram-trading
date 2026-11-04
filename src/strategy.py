@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V5 - Ultimate)")
+        logger.log_system_event("Strategy Initialized (Golden V6 - Pivots & 48H)")
 
     async def start_monitoring(self):
         self.running = True
@@ -70,36 +70,39 @@ class StrategyManager:
         
         if not h2 or not m30 or not m15: return None
 
-        # 🛡️ لایه اول: فیلتر روند 2 ساعته
+        # Layer 1: 2H Trend
         is_uptrend = h2.get('close', 0) > h2.get('ema_200', 0) and h2.get('adx', 0) > 20
         is_downtrend = h2.get('close', 0) < h2.get('ema_200', 0) and h2.get('adx', 0) > 20
         if not (is_uptrend or is_downtrend): return None
 
         m30_close = m30.get('close', 0)
-        m30_vol = m30.get('volume', 0)
-        m30_avg_vol = m30.get('volume_avg_20', 1)
-        
         now = datetime.now(timezone.utc)
 
-        # ⚡ لایه دوم: شکست با بدنه + فیلتر حجم 1.4 در تایم 30 دقیقه
-        volume_ok = m30_vol > (m30_avg_vol * 1.4)
+        # Layer 2: Pivot Levels (48H)
+        pivot_highs = sorted(h2.get('pivot_highs', []))
+        pivot_lows = sorted(h2.get('pivot_lows', []), reverse=True)
 
-        if is_uptrend and m30_close > m30.get('high_10', 0) and volume_ok:
-            self.watchlist[symbol] = {'type': 'BUY', 'level': m30.get('high_10', 0), 'swing_low': m30.get('swing_low', 0), 'time': now}
-            logger.log_system_event(f"📝 Valid 30M Breakout UP for {symbol} (Vol>1.4x). Waiting for 15M retest...")
-            return None
+        nearest_resistance = next((level for level in pivot_highs if level > m30_close), None)
+        nearest_support = next((level for level in pivot_lows if level < m30_close), None)
 
-        elif is_downtrend and m30_close < m30.get('low_10', 0) and volume_ok:
-            self.watchlist[symbol] = {'type': 'SELL', 'level': m30.get('low_10', 0), 'swing_high': m30.get('swing_high', 0), 'time': now}
-            logger.log_system_event(f"📝 Valid 30M Breakout DOWN for {symbol} (Vol>1.4x). Waiting for 15M retest...")
-            return None
+        if is_uptrend and nearest_resistance:
+            if m30_close > nearest_resistance:
+                self.watchlist[symbol] = {'type': 'BUY', 'level': nearest_resistance, 'time': now}
+                logger.log_system_event(f"📝 Valid 30M Breakout UP for {symbol} (Resistance: {nearest_resistance}). Waiting for 15M retest...")
+                return None
 
-        # 🎯 لایه سوم: ماشه در تایم 15 دقیقه (ریتست با تلورانس 0.3 ATR + فیلتر پویا EMA)
+        elif is_downtrend and nearest_support:
+            if m30_close < nearest_support:
+                self.watchlist[symbol] = {'type': 'SELL', 'level': nearest_support, 'time': now}
+                logger.log_system_event(f"📝 Valid 30M Breakout DOWN for {symbol} (Support: {nearest_support}). Waiting for 15M retest...")
+                return None
+
+        # Layer 3: 15M Trigger
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
             
-            if time_diff > 3: # انقضای 3 ساعته برای تایم 30 دقیقه
+            if time_diff > 72: 
                 del self.watchlist[symbol]
                 return None
 
@@ -108,50 +111,46 @@ class StrategyManager:
             m15_low = m15.get('low', 0)
             atr_15m = m15.get('atr', 0.0010)
             
-            # فیلتر پویا: اگر ADX بالای 30 بود، فاصله از EMA 20 مهم نیست. اگر نه، حداکثر 1.5 ATR فاصله مجاز است.
             adx_2h = h2.get('adx', 0)
-            m30_ema20 = m30.get('ema_20', 0)
-            m30_atr = m30.get('atr', 0.0010)
+            m15_ema20 = m30.get('ema_20', 0) 
             
             if adx_2h > 30:
                 ema_filter_ok = True 
             else:
-                ema_filter_ok = abs(m15_close - m30_ema20) < (m30_atr * 1.5)
+                ema_filter_ok = abs(m15_close - m15_ema20) < (atr_15m * 1.5)
 
-            # تلورانس 0.3 ATR برای لمس سطح
             tolerance = atr_15m * 0.3
             level = watch['level']
 
+            volume_ok = m15.get('volume', 0) > (m15.get('volume_avg_20', 1) * 1.3)
+
             if watch['type'] == 'BUY' and is_uptrend:
-                # سایه به سطح یا محدوده تلورانس خورده، و بدنه بالای سطح بسته شده
-                if m15_low <= (level + tolerance) and m15_close > level and ema_filter_ok:
+                if m15_low <= (level + tolerance) and m15_close > level and ema_filter_ok and volume_ok:
                     signal_type = "BUY"
                     del self.watchlist[symbol]
                     
-                    stop_loss = watch['swing_low'] - (atr_15m * 0.5) 
+                    stop_loss = min(m15_low, level) - (atr_15m * 0.5) 
                     take_profit = m15_close + ((m15_close - stop_loss) * 1.5)
                 else: return None
 
             elif watch['type'] == 'SELL' and is_downtrend:
-                # سایه به سطح یا محدوده تلورانس خورده، و بدنه زیر سطح بسته شده
-                if m15_high >= (level - tolerance) and m15_close < level and ema_filter_ok:
+                if m15_high >= (level - tolerance) and m15_close < level and ema_filter_ok and volume_ok:
                     signal_type = "SELL"
                     del self.watchlist[symbol]
                     
-                    stop_loss = watch['swing_high'] + (atr_15m * 0.5)
+                    stop_loss = max(m15_high, level) + (atr_15m * 0.5)
                     take_profit = m15_close - ((stop_loss - m15_close) * 1.5)
                 else: return None
             else: return None
         else: return None
 
-        # 🏆 نهایی‌سازی سیگنال و مدیریت ریسک
+        # Finalize Signal
         if signal_type:
             if symbol != "XAUUSDT":
                 if self.last_crypto_signal_time:
                     c_time_diff = (now - self.last_crypto_signal_time).total_seconds() / 3600
                     if c_time_diff < 4: return None 
             
-            # بررسی RR (حداقل 1.5)
             if signal_type == "BUY":
                 rr = (take_profit - m15_close) / (m15_close - stop_loss) if (m15_close - stop_loss) > 0 else 0
             else:
@@ -165,8 +164,8 @@ class StrategyManager:
             signal = {
                 'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
                 'stop_loss': round(stop_loss, 4), 'take_profit_1': round(take_profit, 4), 
-                'take_profit_2': 0, 'strategy': 'Golden_V5_Ultimate'
+                'take_profit_2': 0, 'strategy': 'Golden_V6'
             }
-            logger.log_system_event(f"🏆 GOLDEN V5 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss}")
+            logger.log_system_event(f"🏆 GOLDEN V6 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss}")
             return signal
         return None
