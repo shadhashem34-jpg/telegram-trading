@@ -73,41 +73,38 @@ class MarketDataHandler:
         try:
             category = "linear"
             
-            kline_2h = self.session.get_kline(category=category, symbol=symbol, interval="120", limit=200)['result']['list']
-            kline_30m = self.session.get_kline(category=category, symbol=symbol, interval="30", limit=200)['result']['list']
-            kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=200)['result']['list']
+            kline_4h = self.session.get_kline(category=category, symbol=symbol, interval="240", limit=200)['result']['list']
+            kline_1h = self.session.get_kline(category=category, symbol=symbol, interval="60", limit=100)['result']['list']
+            kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=100)['result']['list']
 
-            # Drop unclosed candles
-            kline_2h = kline_2h[1:] 
-            kline_30m = kline_30m[1:]
+            kline_4h = kline_4h[1:] 
+            kline_1h = kline_1h[1:]
             kline_15m = kline_15m[1:]
 
-            k2h = kline_2h[::-1]
-            k30m = kline_30m[::-1]
+            k4h = kline_4h[::-1]
+            k1h = kline_1h[::-1]
             k15m = kline_15m[::-1]
 
-            if not k2h or not k30m or not k15m: return None
+            if not k4h or not k1h or not k15m: return None
 
-            # 2H Data
-            h2_closes = [float(k[4]) for k in k2h]
-            h2_highs = [float(k[2]) for k in k2h]
-            h2_lows = [float(k[3]) for k in k2h]
-            ema_200_2h = self._calculate_ema(h2_closes, 200)
-            adx_2h = self._calculate_adx(h2_highs, h2_lows, h2_closes)
-            
-            # Find 48h-72h Pivots (24 to 36 candles of 2h)
-            recent_h2_highs = h2_highs[-36:]
-            recent_h2_lows = h2_lows[-36:]
-            pivot_highs, pivot_lows = self._find_pivots(recent_h2_highs, recent_h2_lows)
-            
-            if not pivot_highs: pivot_highs = [max(recent_h2_highs)]
-            if not pivot_lows: pivot_lows = [min(recent_h2_lows)]
+            # 4H Data
+            h4_closes = [float(k[4]) for k in k4h]
+            h4_highs = [float(k[2]) for k in k4h]
+            h4_lows = [float(k[3]) for k in k4h]
+            ema_200_4h = self._calculate_ema(h4_closes, 200)
+            adx_4h = self._calculate_adx(h4_highs, h4_lows, h4_closes)
+            h4_pivot_highs, h4_pivot_lows = self._find_pivots(h4_highs[-30:], h4_lows[-30:])
 
-            # 30M Data
-            m30_closes = [float(k[4]) for k in k30m]
-            ema_20_30m = self._calculate_ema(m30_closes, 20)
-            atr_30m = self._calculate_atr([float(k[2]) for k in k30m], [float(k[3]) for k in k30m], m30_closes)
+            # 1H Data (Added ATR for Zones)
+            h1_highs = [float(k[2]) for k in k1h]
+            h1_lows = [float(k[3]) for k in k1h]
+            h1_closes = [float(k[4]) for k in k1h]
+            atr_1h = self._calculate_atr(h1_highs, h1_lows, h1_closes)
+            h1_pivot_highs, h1_pivot_lows = self._find_pivots(h1_highs[-24:], h1_lows[-24:])
             
+            if not h1_pivot_highs: h1_pivot_highs = [max(h1_highs[-24:])]
+            if not h1_pivot_lows: h1_pivot_lows = [min(h1_lows[-24:])]
+
             # 15M Data
             m15_closes = [float(k[4]) for k in k15m]
             m15_highs = [float(k[2]) for k in k15m]
@@ -116,23 +113,23 @@ class MarketDataHandler:
             atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
 
             return {
-                'h2': {
-                    'close': h2_closes[-1], 'ema_200': ema_200_2h, 'adx': adx_2h,
-                    'pivot_highs': pivot_highs,
-                    'pivot_lows': pivot_lows
+                'h4': {
+                    'close': h4_closes[-1], 'ema_200': ema_200_4h, 'adx': adx_4h,
+                    'pivot_highs': h4_pivot_highs, 'pivot_lows': h4_pivot_lows
                 },
-                'm30': {
-                    'close': m30_closes[-1], 
-                    'ema_20': ema_20_30m,
-                    'atr': atr_30m
+                'h1': {
+                    'close': h1_closes[-1], 
+                    'atr': atr_1h,
+                    'pivot_highs': h1_pivot_highs, 
+                    'pivot_lows': h1_pivot_lows
                 },
                 'm15': {
                     'close': m15_closes[-1], 
                     'high': m15_highs[-1], 
                     'low': m15_lows[-1],
-                    'atr': atr_15m,
                     'volume': m15_vols[-1],
-                    'volume_avg_20': sum(m15_vols[-21:-1]) / 20
+                    'volume_avg_20': sum(m15_vols[-21:-1]) / 20,
+                    'atr': atr_15m
                 }
             }
         except Exception as e:
