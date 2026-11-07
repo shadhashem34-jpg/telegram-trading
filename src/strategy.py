@@ -14,13 +14,20 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V10.2 - Reduced Symbols)")
+        
+        # 📅 لیست زمان‌های بلاک شده برای اخبار مهم (به وقت UTC)
+        # فرمت: (سال, ماه, روز, ساعت_شروع, دقیقه_شروع, ساعت_پایان, دقیقه_پایان)
+        # مثال: (2026, 11, 10, 15, 15, 15, 45) # برای اخبار ساعت 15:15 تا 15:45
+        self.news_blackouts = [
+            # اینجا تاریخ اخبار مهم رو اضافه کن
+        ]
+        
+        logger.log_system_event("Strategy Initialized (Golden V10.3 - Custom Hours & No Weekend Filter)")
 
     async def start_monitoring(self):
         self.running = True
         logger.log_system_event("Strategy Monitoring Started...")
         
-        # ⚠️ لیست ارزها به ۴ دارایی اصلی و موجود در پراپ فرم محدود شد
         symbols = [
             "BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"
         ] 
@@ -48,13 +55,21 @@ class StrategyManager:
 
     def is_trading_session_active(self) -> bool:
         now = datetime.now(timezone.utc)
+        
+        # ۱. فیلتر ساعت ترید (۱۱ صبح تا ۳:۳۰ نیمه‌شب به وقت ایران = 07:30 تا 23:59 به وقت UTC)
         current_time = now.time()
         start_time = time(7, 30)
-        end_time = time(23, 30)
-        in_window = start_time <= current_time <= end_time
-        london_open_block = time(7, 45) <= current_time <= time(8, 15)
-        ny_open_block = time(12, 45) <= current_time <= time(13, 15)
-        if not in_window or london_open_block or ny_open_block: return False
+        end_time = time(23, 59)
+        if not (start_time <= current_time <= end_time): 
+            return False
+            
+        # ۲. فیلتر اخبار مهم (اگر در بازه خبر باشیم، سیگنال نمیدهیم)
+        for news in self.news_blackouts:
+            news_start = datetime(news[0], news[1], news[2], news[3], news[4], tzinfo=timezone.utc)
+            news_end = datetime(news[0], news[1], news[2], news[5], news[6], tzinfo=timezone.utc)
+            if news_start <= now <= news_end:
+                return False 
+                
         return True
 
     async def generate_signal(self, symbol: str, market_data: dict) -> Optional[dict]:
@@ -94,7 +109,7 @@ class StrategyManager:
                     level = max(broken_resistances)
                     if m15_close > level and m15_vol > (m15_avg_vol * 1.3):
                         self.watchlist[symbol] = {'type': 'BUY', 'level': level, 'time': now}
-                        logger.log_system_event(f"📝 [V10.2] 1H Breakout UP for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
+                        logger.log_system_event(f"📝 [V10.3] 1H Breakout UP for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
                         return None
 
             elif is_downtrend:
@@ -103,7 +118,7 @@ class StrategyManager:
                     level = min(broken_supports)
                     if m15_close < level and m15_vol > (m15_avg_vol * 1.3):
                         self.watchlist[symbol] = {'type': 'SELL', 'level': level, 'time': now}
-                        logger.log_system_event(f"📝 [V10.2] 1H Breakout DOWN for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
+                        logger.log_system_event(f"📝 [V10.3] 1H Breakout DOWN for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
                         return None
 
         # Layer 3: Retest & Signal
@@ -174,8 +189,8 @@ class StrategyManager:
             signal = {
                 'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
                 'stop_loss': round(stop_loss, 4), 'take_profit_1': round(take_profit, 4), 
-                'take_profit_2': 0, 'strategy': 'Golden_V10.2'
+                'take_profit_2': 0, 'strategy': 'Golden_V10.3'
             }
-            logger.log_system_event(f"🏆 GOLDEN V10.2 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V10.3 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
