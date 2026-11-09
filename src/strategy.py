@@ -16,13 +16,9 @@ class StrategyManager:
         self.watchlist = {} 
         
         # 📅 لیست زمان‌های بلاک شده برای اخبار مهم (به وقت UTC)
-        # فرمت: (سال, ماه, روز, ساعت_شروع, دقیقه_شروع, ساعت_پایان, دقیقه_پایان)
-        # مثال: (2026, 11, 10, 15, 15, 15, 45) # برای اخبار ساعت 15:15 تا 15:45
-        self.news_blackouts = [
-            # اینجا تاریخ اخبار مهم رو اضافه کن
-        ]
+        self.news_blackouts = []
         
-        logger.log_system_event("Strategy Initialized (Golden V10.3 - Custom Hours & No Weekend Filter)")
+        logger.log_system_event("Strategy Initialized (Golden V10.4 - Relaxed Retest)")
 
     async def start_monitoring(self):
         self.running = True
@@ -63,7 +59,7 @@ class StrategyManager:
         if not (start_time <= current_time <= end_time): 
             return False
             
-        # ۲. فیلتر اخبار مهم (اگر در بازه خبر باشیم، سیگنال نمیدهیم)
+        # ۲. فیلتر اخبار مهم
         for news in self.news_blackouts:
             news_start = datetime(news[0], news[1], news[2], news[3], news[4], tzinfo=timezone.utc)
             news_end = datetime(news[0], news[1], news[2], news[5], news[6], tzinfo=timezone.utc)
@@ -109,7 +105,7 @@ class StrategyManager:
                     level = max(broken_resistances)
                     if m15_close > level and m15_vol > (m15_avg_vol * 1.3):
                         self.watchlist[symbol] = {'type': 'BUY', 'level': level, 'time': now}
-                        logger.log_system_event(f"📝 [V10.3] 1H Breakout UP for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
+                        logger.log_system_event(f"📝 [V10.4] 1H Breakout UP for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
                         return None
 
             elif is_downtrend:
@@ -118,10 +114,10 @@ class StrategyManager:
                     level = min(broken_supports)
                     if m15_close < level and m15_vol > (m15_avg_vol * 1.3):
                         self.watchlist[symbol] = {'type': 'SELL', 'level': level, 'time': now}
-                        logger.log_system_event(f"📝 [V10.3] 1H Breakout DOWN for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
+                        logger.log_system_event(f"📝 [V10.4] 1H Breakout DOWN for {symbol} at {level} (15M Vol OK). Waiting for Retest...")
                         return None
 
-        # Layer 3: Retest & Signal
+        # Layer 3: Retest & Signal (Relaxed Condition)
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
@@ -138,7 +134,11 @@ class StrategyManager:
             is_valid_pullback_volume = m15_vol < (m15_avg_vol * 1.5)
 
             if watch['type'] == 'BUY' and is_uptrend:
-                if m15_low <= zone_top and m15_close > level and is_valid_pullback_volume:
+                # شرط جدید: یا سایه به ناحیه خورده، یا بدنه به سطح نزدیک شده و سایه پایین کوچیکه
+                wick_touched_zone = m15_low <= zone_top
+                body_near_level = (m15_close > level) and ((m15_close - m15_low) < (atr_15m * 0.5))
+                
+                if (wick_touched_zone or body_near_level) and m15_close > level and is_valid_pullback_volume:
                     signal_type = "BUY"
                     del self.watchlist[symbol]
                     
@@ -153,7 +153,11 @@ class StrategyManager:
                 else: return None
 
             elif watch['type'] == 'SELL' and is_downtrend:
-                if m15_high >= zone_bottom and m15_close < level and is_valid_pullback_volume:
+                # شرط جدید: یا سایه به ناحیه خورده، یا بدنه به سطح نزدیک شده و سایه بالا کوچیکه
+                wick_touched_zone = m15_high >= zone_bottom
+                body_near_level = (m15_close < level) and ((m15_high - m15_close) < (atr_15m * 0.5))
+
+                if (wick_touched_zone or body_near_level) and m15_close < level and is_valid_pullback_volume:
                     signal_type = "SELL"
                     del self.watchlist[symbol]
                     
@@ -189,8 +193,8 @@ class StrategyManager:
             signal = {
                 'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
                 'stop_loss': round(stop_loss, 4), 'take_profit_1': round(take_profit, 4), 
-                'take_profit_2': 0, 'strategy': 'Golden_V10.3'
+                'take_profit_2': 0, 'strategy': 'Golden_V10.4'
             }
-            logger.log_system_event(f"🏆 GOLDEN V10.3 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V10.4 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
