@@ -1,6 +1,6 @@
 import asyncio
 from typing import Optional
-from datetime import datetime, timezone, time
+from datetime import datetime, timezone
 from logger import get_trading_logger
 
 logger = get_trading_logger()
@@ -14,12 +14,11 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        self.news_blackouts = []
-        logger.log_system_event("Strategy Initialized (Golden V12 - Liquidity Sweep)")
+        logger.log_system_event("Strategy Initialized (Golden V12.2 - 24/7 Liquidity Sweep)")
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("Strategy Monitoring Started...")
+        logger.log_system_event("Strategy Monitoring Started (24/7 Mode)...")
         
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"] 
         
@@ -36,7 +35,8 @@ class StrategyManager:
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
                 
-                await asyncio.sleep(15) 
+                # افزایش زمان استراحت به 30 ثانیه
+                await asyncio.sleep(30) 
             
             await asyncio.sleep(60)
 
@@ -45,15 +45,7 @@ class StrategyManager:
         logger.log_system_event("StrategyManager stopped")
 
     def is_trading_session_active(self) -> bool:
-        now = datetime.now(timezone.utc)
-        current_time = now.time()
-        start_time = time(7, 30); end_time = time(23, 59)
-        if not (start_time <= current_time <= end_time): return False
-        
-        for news in self.news_blackouts:
-            news_start = datetime(news[0], news[1], news[2], news[3], news[4], tzinfo=timezone.utc)
-            news_end = datetime(news[0], news[1], news[2], news[5], news[6], tzinfo=timezone.utc)
-            if news_start <= now <= news_end: return False 
+        # 🟢 محدودیت زمانی کاملاً برداشته شد. ربات 24 ساعته کار می‌کند.
         return True
 
     async def generate_signal(self, symbol: str, market_data: dict) -> Optional[dict]:
@@ -66,11 +58,9 @@ class StrategyManager:
         
         if not h4 or not h1 or not m15: return None
 
-        # 1. فیلتر روند ۴ ساعته
         is_uptrend = h4.get('close', 0) > h4.get('ema_200', 0)
         is_downtrend = h4.get('close', 0) < h4.get('ema_200', 0)
         
-        # 2. سطوح نقدینگی
         swing_highs = sorted(h1.get('swing_highs', []))
         swing_lows = sorted(h1.get('swing_lows', []), reverse=True)
         
@@ -81,25 +71,31 @@ class StrategyManager:
         m15_open = m15.get('open', 0)
         atr_15m = m15.get('atr', 0.0010)
 
-        # 3. تشخیص شکار نقدینگی (Liquidity Sweep)
         if is_downtrend:
             valid_liquidity_highs = [sh for sh in swing_highs if sh > m15_close]
-            for lvl in valid_liquidity_highs:
-                # سایه بالا از سطح رد شده، اما بدنه (Close) زیر سطح بسته شده
-                if m15_high > lvl and m15_close < lvl and m15_close < m15_open:
-                    self.watchlist[symbol] = {'type': 'SELL', 'level': lvl, 'time': now}
-                    logger.log_system_event(f"📝 [V12] Liquidity Sweep UP for {symbol} at {lvl}. Waiting for confirmation...")
-                    return None
+            if valid_liquidity_highs:
+                closest_level = min(valid_liquidity_highs)
+                # لاگ تشخیصی برای اینکه ببینیم ربات چه سطحی را زیر نظر دارد
+                logger.log_system_event(f"🔍 [V12.2] {symbol} Down. Nearest Liq: {closest_level:.2f} | 15M C:{m15_close:.2f} H:{m15_high:.2f}")
+                
+                for lvl in valid_liquidity_highs:
+                    if m15_high > lvl and m15_close < lvl and m15_close < m15_open:
+                        self.watchlist[symbol] = {'type': 'SELL', 'level': lvl, 'time': now}
+                        logger.log_system_event(f"📝 [V12.2] Liquidity Sweep UP for {symbol} at {lvl}. Waiting for confirmation...")
+                        return None
 
         elif is_uptrend:
             valid_liquidity_lows = [sl for sl in swing_lows if sl < m15_close]
-            for lvl in valid_liquidity_lows:
-                if m15_low < lvl and m15_close > lvl and m15_close > m15_open:
-                    self.watchlist[symbol] = {'type': 'BUY', 'level': lvl, 'time': now}
-                    logger.log_system_event(f"📝 [V12] Liquidity Sweep DOWN for {symbol} at {lvl}. Waiting for confirmation...")
-                    return None
+            if valid_liquidity_lows:
+                closest_level = max(valid_liquidity_lows)
+                logger.log_system_event(f"🔍 [V12.2] {symbol} Up. Nearest Liq: {closest_level:.2f} | 15M C:{m15_close:.2f} L:{m15_low:.2f}")
 
-        # 4. ورود پس از شکار نقدینگی
+                for lvl in valid_liquidity_lows:
+                    if m15_low < lvl and m15_close > lvl and m15_close > m15_open:
+                        self.watchlist[symbol] = {'type': 'BUY', 'level': lvl, 'time': now}
+                        logger.log_system_event(f"📝 [V12.2] Liquidity Sweep DOWN for {symbol} at {lvl}. Waiting for confirmation...")
+                        return None
+
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
@@ -109,31 +105,26 @@ class StrategyManager:
                 return None
 
             level = watch['level']
-            
-            # فیلتر حجم نرم (نباید بیش از ۱.۵ برابر باشد)
             vol_ok = m15.get('volume', 0) < (m15.get('volume_avg_20', 1) * 1.5)
 
             if watch['type'] == 'SELL' and is_downtrend:
                 if m15_high >= level and m15_close < level and m15_close < m15_open and vol_ok:
                     signal_type = "SELL"
                     del self.watchlist[symbol]
-                    
                     stop_loss = m15_high + (atr_15m * 0.5)
-                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0) # هدف ۲ برابر ریسک
+                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
                 else: return None
 
             elif watch['type'] == 'BUY' and is_uptrend:
                 if m15_low <= level and m15_close > level and m15_close > m15_open and vol_ok:
                     signal_type = "BUY"
                     del self.watchlist[symbol]
-                    
                     stop_loss = m15_low - (atr_15m * 0.5)
                     take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
                 else: return None
             else: return None
         else: return None
 
-        # 5. نهایی‌سازی
         if signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
@@ -151,8 +142,8 @@ class StrategyManager:
             signal = {
                 'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
                 'stop_loss': round(stop_loss, 4), 'take_profit_1': round(take_profit, 4), 
-                'take_profit_2': 0, 'strategy': 'Golden_V12'
+                'take_profit_2': 0, 'strategy': 'Golden_V12.2'
             }
-            logger.log_system_event(f"🏆 GOLDEN V12 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V12.2 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
