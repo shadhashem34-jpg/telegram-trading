@@ -67,14 +67,13 @@ class StrategyManager:
 
         if len(h1_highs) < 16: return None
 
-        # 🟢 ۱. محاسبه زون‌ها از ۱۵ کندل بسته شده قبلی (بدون احتساب کندل در حال تشکیل)
+        # محاسبه زون‌ها از ۱۵ کندل بسته شده قبلی
         recent_h1_highs = h1_highs[-16:-1] 
         recent_h1_lows = h1_lows[-16:-1]
         
         range_high = max(recent_h1_highs)
         range_low = min(recent_h1_lows)
         
-        # ساخت زون باریک (0.3 ATR)
         zone_buffer = atr_15m * 0.3
         res_zone_bottom = range_high - zone_buffer
         res_zone_top = range_high
@@ -82,28 +81,24 @@ class StrategyManager:
         sup_zone_bottom = range_low - zone_buffer
         sup_zone_top = range_low
 
-        # 🟢 ۲. لاگ رادار
         logger.log_system_event(f"📡 [V21 RADAR] {symbol} | Price: {m15_close:.2f} | Res: {res_zone_bottom:.2f}-{res_zone_top:.2f} | Sup: {sup_zone_bottom:.2f}-{sup_zone_top:.2f}")
 
-        # 🎯 ۳. تشخیص شکست زنده (Live Breakout) و ثبت در واچ‌لیست
-        # اگر روند نزولی است و قیمت 15 دقیقه‌ای زیر زون حمایت بسته شد (شکست رخ داد)
+        # تشخیص شکست زنده و ثبت در واچ‌لیست
         if is_downtrend and m15_close < sup_zone_bottom:
             if symbol not in self.watchlist:
                 self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': sup_zone_top, 'time': now}
                 logger.log_system_event(f"📝 [V21] Live Breakdown below {sup_zone_top:.2f}. Level LOCKED. Waiting for 15M Retest...")
 
-        # اگر روند صعودی است و قیمت 15 دقیقه‌ای بالای زون مقاومت بسته شد (شکست رخ داد)
         elif is_uptrend and m15_close > res_zone_top:
             if symbol not in self.watchlist:
                 self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': res_zone_bottom, 'time': now}
                 logger.log_system_event(f"📝 [V21] Live Breakout above {res_zone_bottom:.2f}. Level LOCKED. Waiting for 15M Retest...")
 
-        # 🎯 ۴. شکار پولبک به سطح قفل شده (حتی اگر داخل همون کندل 1 ساعته باشه)
+        # شکار پولبک به سطح قفل شده
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
             
-            # انقضای 8 ساعته (چون ممکنه چند کندل 1 ساعته طول بکشه)
             if time_diff > 8: 
                 del self.watchlist[symbol]
                 return None
@@ -112,8 +107,6 @@ class StrategyManager:
             signal_type = None
 
             if watch['type'] == 'SELL_RETEST' and is_downtrend:
-                # آیا قیمت به سطح قفل شده (level) برگشته و سایه زده؟
-                # در تایم 15 دقیقه: سایه بالا به سطح یا بالاتر از اون رسیده، اما بدنه زیر سطح بسته شده
                 if m15_high >= level and m15_close < level and m15_close < m15_open:
                     signal_type = "SELL"
                     stop_loss = m15_high + (atr_15m * 0.5)
@@ -121,14 +114,13 @@ class StrategyManager:
                     del self.watchlist[symbol]
 
             elif watch['type'] == 'BUY_RETEST' and is_uptrend:
-                # سایه پایین به سطح رسیده، اما بدنه بالای سطح بسته شده
                 if m15_low <= level and m15_close > level and m15_close > m15_open:
                     signal_type = "BUY"
                     stop_loss = m15_low - (atr_15m * 0.5)
                     take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
                     del self.watchlist[symbol]
 
-        # 🏆 ۵. نهایی‌سازی سیگنال
+        # نهایی‌سازی سیگنال
         if 'signal_type' in locals() and signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
