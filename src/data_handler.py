@@ -49,7 +49,6 @@ class MarketDataHandler:
             # 1H Data
             h1_highs = [float(k[2]) for k in k1h]
             h1_lows = [float(k[3]) for k in k1h]
-            h1_closes = [float(k[4]) for k in k1h]
 
             # 15M Data
             m15_closes = [float(k[4]) for k in k15m]
@@ -66,8 +65,7 @@ class MarketDataHandler:
                 },
                 'h1': {
                     'highs': h1_highs[-15:], # ۱۵ کندل اخیر ۱ ساعته
-                    'lows': h1_lows[-15:],
-                    'closes': h1_closes[-15:]
+                    'lows': h1_lows[-15:]
                 },
                 'm15': {
                     'close': m15_closes[-1], 
