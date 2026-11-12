@@ -42,11 +42,14 @@ class MarketDataHandler:
 
             # 4H Data
             h4_closes = [float(k[4]) for k in k4h]
+            h4_highs = [float(k[2]) for k in k4h]
+            h4_lows = [float(k[3]) for k in k4h]
             ema_200_4h = self._calculate_ema(h4_closes, min(200, len(h4_closes)))
 
-            # 1H Data (ارسال آرایه 48 کندلی)
+            # 1H Data
             h1_highs = [float(k[2]) for k in k1h]
             h1_lows = [float(k[3]) for k in k1h]
+            h1_closes = [float(k[4]) for k in k1h]
 
             # 15M Data
             m15_closes = [float(k[4]) for k in k15m]
@@ -55,10 +58,16 @@ class MarketDataHandler:
             atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
 
             return {
-                'h4': { 'close': h4_closes[-1], 'ema_200': ema_200_4h },
+                'h4': { 
+                    'close': h4_closes[-1], 
+                    'highs': h4_highs[-30:], # ۳۰ کندل اخیر ۴ ساعته
+                    'lows': h4_lows[-30:], 
+                    'ema_200': ema_200_4h 
+                },
                 'h1': {
-                    'highs': h1_highs[-48:], 
-                    'lows': h1_lows[-48:]   
+                    'highs': h1_highs[-15:], # ۱۵ کندل اخیر ۱ ساعته
+                    'lows': h1_lows[-15:],
+                    'closes': h1_closes[-15:]
                 },
                 'm15': {
                     'close': m15_closes[-1], 
