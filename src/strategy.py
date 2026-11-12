@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V21 - Live Retest)")
+        logger.log_system_event("Strategy Initialized (Golden V22 - Multi-Timeframe Levels)")
 
     async def start_monitoring(self):
         self.running = True
@@ -52,49 +52,61 @@ class StrategyManager:
         
         if not h4 or not h1 or not m15: return None
 
+        # ۱. فیلتر روند (دست نخورده)
         is_uptrend = h4.get('close', 0) > h4.get('ema_200', 0)
         is_downtrend = h4.get('close', 0) < h4.get('ema_200', 0)
         
         now = datetime.now(timezone.utc)
-        h1_highs = h1.get('highs', [])
-        h1_lows = h1.get('lows', [])
-        
         m15_close = m15.get('close', 0)
         m15_high = m15.get('high', 0)
         m15_low = m15.get('low', 0)
         m15_open = m15.get('open', 0)
         atr_15m = m15.get('atr', 0.0010)
 
-        if len(h1_highs) < 16: return None
+        # ۲. سطوح کلان (۴ ساعته)
+        major_res = max(h4.get('highs', [m15_high]))
+        major_sup = min(h4.get('lows', [m15_low]))
 
-        # محاسبه زون‌ها از ۱۵ کندل بسته شده قبلی
-        recent_h1_highs = h1_highs[-16:-1] 
-        recent_h1_lows = h1_lows[-16:-1]
+        # ۳. سطوح خرد (۱ ساعته)
+        minor_res_list = h1.get('highs', [])
+        minor_sup_list = h1.get('lows', [])
         
-        range_high = max(recent_h1_highs)
-        range_low = min(recent_h1_lows)
-        
-        zone_buffer = atr_15m * 0.3
-        res_zone_bottom = range_high - zone_buffer
-        res_zone_top = range_high
-        
-        sup_zone_bottom = range_low - zone_buffer
-        sup_zone_top = range_low
+        # ۴. حذف تداخل (اگر سطح ۱ ساعته به سطح ۴ ساعته نزدیک بود، حذف شود)
+        valid_minor_res = [m for m in minor_res_list if abs(m - major_res) >= (atr_15m * 0.5)]
+        valid_minor_sup = [m for m in minor_sup_list if abs(m - major_sup) >= (atr_15m * 0.5)]
 
-        logger.log_system_event(f"📡 [V21 RADAR] {symbol} | Price: {m15_close:.2f} | Res: {res_zone_bottom:.2f}-{res_zone_top:.2f} | Sup: {sup_zone_bottom:.2f}-{sup_zone_top:.2f}")
+        # پیدا کردن نزدیک‌ترین سطح خرد معتبر (اگر وجود داشت)
+        nearest_minor_res = min([m for m in valid_minor_res if m > m15_close], default=None)
+        nearest_minor_sup = max([m for m in valid_minor_sup if m < m15_close], default=None)
 
-        # تشخیص شکست زنده و ثبت در واچ‌لیست
-        if is_downtrend and m15_close < sup_zone_bottom:
-            if symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': sup_zone_top, 'time': now}
-                logger.log_system_event(f"📝 [V21] Live Breakdown below {sup_zone_top:.2f}. Level LOCKED. Waiting for 15M Retest...")
+        # لاگ‌گیری کامل برای اینکه ببینیم ربات چی می‌بینه
+        logger.log_system_event(f"📡 [V22 RADAR] {symbol} | Price: {m15_close:.2f}")
+        logger.log_system_event(f"   ↳ 4H Major: Res {major_res:.2f} | Sup {major_sup:.2f}")
+        if nearest_minor_res: logger.log_system_event(f"   ↳ 1H Minor Res: {nearest_minor_res:.2f}")
+        if nearest_minor_sup: logger.log_system_event(f"   ↳ 1H Minor Sup: {nearest_minor_sup:.2f}")
 
-        elif is_uptrend and m15_close > res_zone_top:
-            if symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': res_zone_bottom, 'time': now}
-                logger.log_system_event(f"📝 [V21] Live Breakout above {res_zone_bottom:.2f}. Level LOCKED. Waiting for 15M Retest...")
+        # ۵. تشخیص شکست و قفل کردن سطح
+        if is_downtrend:
+            # بررسی شکست سطح کلان
+            if m15_close < major_sup and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': major_sup, 'time': now, 'tf': '4H'}
+                logger.log_system_event(f"📝 [V22] Major 4H Breakdown below {major_sup:.2f}. LOCKED. Waiting for Retest...")
+            # بررسی شکست سطح خرد
+            elif nearest_minor_sup and m15_close < nearest_minor_sup and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': nearest_minor_sup, 'time': now, 'tf': '1H'}
+                logger.log_system_event(f"📝 [V22] Minor 1H Breakdown below {nearest_minor_sup:.2f}. LOCKED. Waiting for Retest...")
 
-        # شکار پولبک به سطح قفل شده
+        elif is_uptrend:
+            # بررسی شکست سطح کلان
+            if m15_close > major_res and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': major_res, 'time': now, 'tf': '4H'}
+                logger.log_system_event(f"📝 [V22] Major 4H Breakout above {major_res:.2f}. LOCKED. Waiting for Retest...")
+            # بررسی شکست سطح خرد
+            elif nearest_minor_res and m15_close > nearest_minor_res and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': nearest_minor_res, 'time': now, 'tf': '1H'}
+                logger.log_system_event(f"📝 [V22] Minor 1H Breakout above {nearest_minor_res:.2f}. LOCKED. Waiting for Retest...")
+
+        # ۶. شکار پولبک در تایم ۱۵ دقیقه (دست نخورده)
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
@@ -120,7 +132,7 @@ class StrategyManager:
                     take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
                     del self.watchlist[symbol]
 
-        # نهایی‌سازی سیگنال
+        # ۷. نهایی‌سازی سیگنال (دست نخورده)
         if 'signal_type' in locals() and signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
@@ -134,8 +146,8 @@ class StrategyManager:
                 'take_profit_1': round(take_profit, 4), 
                 'take_profit_2': 0, 
                 'take_profit_3': 0,
-                'strategy': 'Golden_V21'
+                'strategy': 'Golden_V22'
             }
-            logger.log_system_event(f"🏆 GOLDEN V21 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V22 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
