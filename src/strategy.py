@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V14 - Pure Liquidity & 1TP)")
+        logger.log_system_event("Strategy Initialized (Golden V16 - Nearest Swing Levels)")
 
     async def start_monitoring(self):
         self.running = True
@@ -65,91 +65,108 @@ class StrategyManager:
         m15_open = m15.get('open', 0)
         atr_15m = m15.get('atr', 0.0010)
 
-        # ۱. پیدا کردن پیوت‌های ۲۴ کندل اخیر و فیلتر کردن سطوح مصرف شده
-        fresh_highs = []
-        fresh_lows = []
-        
+        if len(h1_highs) < 5: return None
+
+        # 🟢 ۱. پیدا کردن سقف‌ها و کف‌های نوسانی معتبر در ۴۸ کندل اخیر
+        valid_swing_highs = []
+        valid_swing_lows = []
+
         for i in range(2, len(h1_highs) - 2):
-            if len(h1_highs) - i > 24: continue 
-            
-            # سقف معتبر
+            # سقف نوسانی: از ۲ کندل چپ و ۲ کندل راست بالاتر باشد
             if h1_highs[i] > h1_highs[i-1] and h1_highs[i] > h1_highs[i-2] and \
                h1_highs[i] > h1_highs[i+1] and h1_highs[i] > h1_highs[i+2]:
-                is_swept = False
-                for j in range(i + 1, len(h1_highs)):
-                    if h1_highs[j] > h1_highs[i]:
-                        is_swept = True
-                        break
+                # آیا بعد از تشکیل این سقف، قیمت ازش رد شده؟ (مصرف شده)
+                is_swept = any(h1_highs[j] > h1_highs[i] for j in range(i + 1, len(h1_highs)))
                 if not is_swept:
-                    fresh_highs.append(h1_highs[i])
-                    
-            # کف معتبر
+                    valid_swing_highs.append(h1_highs[i])
+
+            # کف نوسانی: از ۲ کندل چپ و ۲ کندل راست پایین‌تر باشد
             if h1_lows[i] < h1_lows[i-1] and h1_lows[i] < h1_lows[i-2] and \
                h1_lows[i] < h1_lows[i+1] and h1_lows[i] < h1_lows[i+2]:
-                is_swept = False
-                for j in range(i + 1, len(h1_lows)):
-                    if h1_lows[j] < h1_lows[i]:
-                        is_swept = True
-                        break
+                is_swept = any(h1_lows[j] < h1_lows[i] for j in range(i + 1, len(h1_lows)))
                 if not is_swept:
-                    fresh_lows.append(h1_lows[i])
+                    valid_swing_lows.append(h1_lows[i])
 
-        # ۲. تشخیص شکار نقدینگی با نزدیک‌ترین سطح تمیز
-        if is_downtrend:
-            valid_highs = [h for h in fresh_highs if h > m15_close]
-            if valid_highs:
-                nearest_bsl = min(valid_highs)
-                logger.log_system_event(f"🔍 [V14] {symbol} Down. Fresh BSL: {nearest_bsl:.2f} | 15M H:{m15_high:.2f} C:{m15_close:.2f}")
-                
-                if m15_high > nearest_bsl and m15_close < nearest_bsl and m15_close < m15_open:
-                    self.watchlist[symbol] = {'type': 'SELL', 'level': nearest_bsl, 'time': now}
-                    logger.log_system_event(f"📝 [V14] BSL Swept for {symbol} at {nearest_bsl}. Waiting for confirmation...")
-                    return None
+        # 🟢 ۲. پیدا کردن نزدیک‌ترین سطح معتبر به قیمت فعلی
+        # نزدیک‌ترین مقاومت (پایین‌ترین سقف معتبری که بالای قیمت فعلی است)
+        nearest_resistance = min([h for h in valid_swing_highs if h > m15_close], default=None)
+        
+        # نزدیک‌ترین حمایت (بالاترین کف معتبری که زیر قیمت فعلی است)
+        nearest_support = max([l for l in valid_swing_lows if l < m15_close], default=None)
 
-        elif is_uptrend:
-            valid_lows = [l for l in fresh_lows if l < m15_close]
-            if valid_lows:
-                nearest_ssl = max(valid_lows)
-                logger.log_system_event(f"🔍 [V14] {symbol} Up. Fresh SSL: {nearest_ssl:.2f} | 15M L:{m15_low:.2f} C:{m15_close:.2f}")
+        # 🟢 ۳. لاگ‌گیری دقیق (بدون پیچیدگی)
+        if nearest_resistance:
+            logger.log_system_event(f"🔍 [V16] {symbol} Down. Nearest Fresh Resistance: {nearest_resistance:.2f} | Price: {m15_close:.2f}")
+        if nearest_support:
+            logger.log_system_event(f"🔍 [V16] {symbol} Up. Nearest Fresh Support: {nearest_support:.2f} | Price: {m15_close:.2f}")
 
-                if m15_low < nearest_ssl and m15_close > nearest_ssl and m15_close > m15_open:
-                    self.watchlist[symbol] = {'type': 'BUY', 'level': nearest_ssl, 'time': now}
-                    logger.log_system_event(f"📝 [V14] SSL Swept for {symbol} at {nearest_ssl}. Waiting for confirmation...")
-                    return None
+        # 🎯 ۴. تشخیص ستاپ (شکست با بدنه ۱ ساعته یا سویپ ۱۵ دقیقه‌ای روی سطح نزدیک)
+        if is_downtrend and nearest_resistance:
+            # شکست با بدنه ۱ ساعته (Breakout)
+            if h1_closes[-1] > nearest_resistance and h1_opens[-1] < nearest_resistance:
+                if symbol not in self.watchlist:
+                    self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': nearest_resistance, 'time': now}
+                    logger.log_system_event(f"📝 [V16] 1H Breakout UP at {nearest_resistance:.2f}. Waiting for pullback...")
+            # شکار نقدینگی (Sweep)
+            elif m15_high > nearest_resistance and m15_close < nearest_resistance and m15_close < m15_open:
+                if symbol not in self.watchlist:
+                    self.watchlist[symbol] = {'type': 'SELL_SWEEP', 'level': nearest_resistance, 'time': now}
+                    logger.log_system_event(f"📝 [V16] Liquidity Swept UP at {nearest_resistance:.2f}. Waiting for confirmation...")
 
-        # ۳. تایید نهایی و صدور سیگنال (فقط یک تی پی با RR=2)
+        elif is_uptrend and nearest_support:
+            # شکست با بدنه ۱ ساعته (Breakout)
+            if h1_closes[-1] < nearest_support and h1_opens[-1] > nearest_support:
+                if symbol not in self.watchlist:
+                    self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': nearest_support, 'time': now}
+                    logger.log_system_event(f"📝 [V16] 1H Breakout DOWN at {nearest_support:.2f}. Waiting for pullback...")
+            # شکار نقدینگی (Sweep)
+            elif m15_low < nearest_support and m15_close > nearest_support and m15_close > m15_open:
+                if symbol not in self.watchlist:
+                    self.watchlist[symbol] = {'type': 'BUY_SWEEP', 'level': nearest_support, 'time': now}
+                    logger.log_system_event(f"📝 [V16] Liquidity Swept DOWN at {nearest_support:.2f}. Waiting for confirmation...")
+
+        # 🎯 ۵. تایید نهایی
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
             
-            if time_diff > 4: 
+            if time_diff > 8: 
                 del self.watchlist[symbol]
                 return None
 
             level = watch['level']
-            
-            if watch['type'] == 'SELL' and is_downtrend:
+            signal_type = None
+
+            if watch['type'] == 'SELL_RETEST' and is_downtrend:
                 if m15_high >= level and m15_close < level and m15_close < m15_open:
                     signal_type = "SELL"
+                    stop_loss = m15_high + (atr_15m * 0.5)
+                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
                     del self.watchlist[symbol]
-                    
-                    stop_loss = m15_high + (atr_15m * 0.5) 
-                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0) # همون تی پی قبلی (RR=2)
-                else: return None
 
-            elif watch['type'] == 'BUY' and is_uptrend:
+            elif watch['type'] == 'BUY_RETEST' and is_uptrend:
                 if m15_low <= level and m15_close > level and m15_close > m15_open:
                     signal_type = "BUY"
-                    del self.watchlist[symbol]
-                    
                     stop_loss = m15_low - (atr_15m * 0.5)
-                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0) # همون تی پی قبلی (RR=2)
-                else: return None
-            else: return None
-        else: return None
+                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
+                    del self.watchlist[symbol]
 
-        # 🏆 نهایی‌سازی سیگنال (فقط TP1)
-        if signal_type:
+            elif watch['type'] == 'SELL_SWEEP' and is_downtrend:
+                if m15_high > level and m15_close < level and m15_close < m15_open:
+                    signal_type = "SELL"
+                    stop_loss = m15_high + (atr_15m * 0.5)
+                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
+                    del self.watchlist[symbol]
+
+            elif watch['type'] == 'BUY_SWEEP' and is_uptrend:
+                if m15_low < level and m15_close > level and m15_close > m15_open:
+                    signal_type = "BUY"
+                    stop_loss = m15_low - (atr_15m * 0.5)
+                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
+                    del self.watchlist[symbol]
+
+        # 🏆 نهایی‌سازی
+        if 'signal_type' in locals() and signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
 
@@ -162,8 +179,8 @@ class StrategyManager:
                 'take_profit_1': round(take_profit, 4), 
                 'take_profit_2': 0, 
                 'take_profit_3': 0,
-                'strategy': 'Golden_V14'
+                'strategy': 'Golden_V16'
             }
-            logger.log_system_event(f"🏆 GOLDEN V14 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V16 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
