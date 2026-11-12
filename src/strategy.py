@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V22 - Multi-Timeframe Levels)")
+        logger.log_system_event("Strategy Initialized (Golden V23 - Structural Zones)")
 
     async def start_monitoring(self):
         self.running = True
@@ -43,6 +43,27 @@ class StrategyManager:
         self.running = False
         logger.log_system_event("StrategyManager stopped")
 
+    def _get_structural_zones(self, highs, lows, atr):
+        """تابع جدید برای پیدا کردن سطوح ساختاری و تشکیل زون"""
+        swing_highs, swing_lows = [], []
+        for i in range(2, len(highs) - 2):
+            # پیدا کردن پیوت‌های معتبر (سقف و کف ساختاری)
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                swing_highs.append(highs[i])
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                swing_lows.append(lows[i])
+        
+        if not swing_highs: swing_highs = [max(highs)]
+        if not swing_lows: swing_lows = [min(lows)]
+        
+        # ساخت زون (Zone) با ضخامت 0.5 ATR
+        zone_buffer = atr * 0.5
+        return {
+            'highs': swing_highs,
+            'lows': swing_lows,
+            'zone_buffer': zone_buffer
+        }
+
     async def generate_signal(self, symbol: str, market_data: dict) -> Optional[dict]:
         if self.signals_today >= self.max_daily_signals: return None
 
@@ -52,7 +73,7 @@ class StrategyManager:
         
         if not h4 or not h1 or not m15: return None
 
-        # ۱. فیلتر روند (دست نخورده)
+        # فیلتر روند
         is_uptrend = h4.get('close', 0) > h4.get('ema_200', 0)
         is_downtrend = h4.get('close', 0) < h4.get('ema_200', 0)
         
@@ -63,50 +84,48 @@ class StrategyManager:
         m15_open = m15.get('open', 0)
         atr_15m = m15.get('atr', 0.0010)
 
-        # ۲. سطوح کلان (۴ ساعته)
-        major_res = max(h4.get('highs', [m15_high]))
-        major_sup = min(h4.get('lows', [m15_low]))
+        # پیدا کردن سطوح ساختاری برای ۴ ساعته و ۱ ساعته
+        h4_zones = self._get_structural_zones(h4.get('highs', []), h4.get('lows', []), atr_15m * 4) # ATR بزرگتر برای 4H
+        h1_zones = self._get_structural_zones(h1.get('highs', []), h1.get('lows', []), atr_15m)
 
-        # ۳. سطوح خرد (۱ ساعته)
-        minor_res_list = h1.get('highs', [])
-        minor_sup_list = h1.get('lows', [])
-        
-        # ۴. حذف تداخل (اگر سطح ۱ ساعته به سطح ۴ ساعته نزدیک بود، حذف شود)
-        valid_minor_res = [m for m in minor_res_list if abs(m - major_res) >= (atr_15m * 0.5)]
-        valid_minor_sup = [m for m in minor_sup_list if abs(m - major_sup) >= (atr_15m * 0.5)]
+        # نزدیک‌ترین سطوح ساختاری بالای قیمت (مقاومت) و زیر قیمت (حمایت)
+        # ما از لیست سطوحی که پیدا شد، نزدیک‌ترینش رو به قیمت انتخاب می‌کنیم
+        valid_h4_res = [z for z in h4_zones['highs'] if z > m15_close]
+        valid_h4_sup = [z for z in h4_zones['lows'] if z < m15_close]
+        nearest_h4_res = min(valid_h4_res) if valid_h4_res else None
+        nearest_h4_sup = max(valid_h4_sup) if valid_h4_sup else None
 
-        # پیدا کردن نزدیک‌ترین سطح خرد معتبر (اگر وجود داشت)
-        nearest_minor_res = min([m for m in valid_minor_res if m > m15_close], default=None)
-        nearest_minor_sup = max([m for m in valid_minor_sup if m < m15_close], default=None)
+        valid_h1_res = [z for z in h1_zones['highs'] if z > m15_close]
+        valid_h1_sup = [z for z in h1_zones['lows'] if z < m15_close]
+        nearest_h1_res = min(valid_h1_res) if valid_h1_res else None
+        nearest_h1_sup = max(valid_h1_sup) if valid_h1_sup else None
 
-        # لاگ‌گیری کامل برای اینکه ببینیم ربات چی می‌بینه
-        logger.log_system_event(f"📡 [V22 RADAR] {symbol} | Price: {m15_close:.2f}")
-        logger.log_system_event(f"   ↳ 4H Major: Res {major_res:.2f} | Sup {major_sup:.2f}")
-        if nearest_minor_res: logger.log_system_event(f"   ↳ 1H Minor Res: {nearest_minor_res:.2f}")
-        if nearest_minor_sup: logger.log_system_event(f"   ↳ 1H Minor Sup: {nearest_minor_sup:.2f}")
+        # لاگ‌گیری دقیق با نمایش زون
+        logger.log_system_event(f"📡 [V23 RADAR] {symbol} | Price: {m15_close:.2f}")
+        if nearest_h4_res: logger.log_system_event(f"   ↳ 4H Res Zone: {nearest_h4_res - h4_zones['zone_buffer']:.2f} - {nearest_h4_res:.2f}")
+        if nearest_h4_sup: logger.log_system_event(f"   ↳ 4H Sup Zone: {nearest_h4_sup:.2f} - {nearest_h4_sup + h4_zones['zone_buffer']:.2f}")
+        if nearest_h1_res: logger.log_system_event(f"   ↳ 1H Res Zone: {nearest_h1_res - h1_zones['zone_buffer']:.2f} - {nearest_h1_res:.2f}")
+        if nearest_h1_sup: logger.log_system_event(f"   ↳ 1H Sup Zone: {nearest_h1_sup:.2f} - {nearest_h1_sup + h1_zones['zone_buffer']:.2f}")
 
-        # ۵. تشخیص شکست و قفل کردن سطح
+        # تشخیص شکست و قفل کردن سطح
+        # ما شکست رو زمانی قبول می‌کنیم که قیمت از زون رد بشه و کندل بسته بشه
         if is_downtrend:
-            # بررسی شکست سطح کلان
-            if m15_close < major_sup and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': major_sup, 'time': now, 'tf': '4H'}
-                logger.log_system_event(f"📝 [V22] Major 4H Breakdown below {major_sup:.2f}. LOCKED. Waiting for Retest...")
-            # بررسی شکست سطح خرد
-            elif nearest_minor_sup and m15_close < nearest_minor_sup and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': nearest_minor_sup, 'time': now, 'tf': '1H'}
-                logger.log_system_event(f"📝 [V22] Minor 1H Breakdown below {nearest_minor_sup:.2f}. LOCKED. Waiting for Retest...")
+            if nearest_h4_sup and m15_close < nearest_h4_sup and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': nearest_h4_sup + h4_zones['zone_buffer'], 'time': now, 'tf': '4H'}
+                logger.log_system_event(f"📝 [V23] 4H Zone Breakdown below {nearest_h4_sup:.2f}. LOCKED. Waiting for Retest...")
+            elif nearest_h1_sup and m15_close < nearest_h1_sup and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': nearest_h1_sup + h1_zones['zone_buffer'], 'time': now, 'tf': '1H'}
+                logger.log_system_event(f"📝 [V23] 1H Zone Breakdown below {nearest_h1_sup:.2f}. LOCKED. Waiting for Retest...")
 
         elif is_uptrend:
-            # بررسی شکست سطح کلان
-            if m15_close > major_res and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': major_res, 'time': now, 'tf': '4H'}
-                logger.log_system_event(f"📝 [V22] Major 4H Breakout above {major_res:.2f}. LOCKED. Waiting for Retest...")
-            # بررسی شکست سطح خرد
-            elif nearest_minor_res and m15_close > nearest_minor_res and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': nearest_minor_res, 'time': now, 'tf': '1H'}
-                logger.log_system_event(f"📝 [V22] Minor 1H Breakout above {nearest_minor_res:.2f}. LOCKED. Waiting for Retest...")
+            if nearest_h4_res and m15_close > nearest_h4_res and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': nearest_h4_res - h4_zones['zone_buffer'], 'time': now, 'tf': '4H'}
+                logger.log_system_event(f"📝 [V23] 4H Zone Breakout above {nearest_h4_res:.2f}. LOCKED. Waiting for Retest...")
+            elif nearest_h1_res and m15_close > nearest_h1_res and symbol not in self.watchlist:
+                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': nearest_h1_res - h1_zones['zone_buffer'], 'time': now, 'tf': '1H'}
+                logger.log_system_event(f"📝 [V23] 1H Zone Breakout above {nearest_h1_res:.2f}. LOCKED. Waiting for Retest...")
 
-        # ۶. شکار پولبک در تایم ۱۵ دقیقه (دست نخورده)
+        # شکار پولبک
         if symbol in self.watchlist:
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
@@ -119,6 +138,7 @@ class StrategyManager:
             signal_type = None
 
             if watch['type'] == 'SELL_RETEST' and is_downtrend:
+                # سایه بالای زون بره و بدنه زیر زون بسته بشه
                 if m15_high >= level and m15_close < level and m15_close < m15_open:
                     signal_type = "SELL"
                     stop_loss = m15_high + (atr_15m * 0.5)
@@ -132,7 +152,7 @@ class StrategyManager:
                     take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
                     del self.watchlist[symbol]
 
-        # ۷. نهایی‌سازی سیگنال (دست نخورده)
+        # نهایی‌سازی سیگنال
         if 'signal_type' in locals() and signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
@@ -146,8 +166,8 @@ class StrategyManager:
                 'take_profit_1': round(take_profit, 4), 
                 'take_profit_2': 0, 
                 'take_profit_3': 0,
-                'strategy': 'Golden_V22'
+                'strategy': 'Golden_V23'
             }
-            logger.log_system_event(f"🏆 GOLDEN V22 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V23 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
