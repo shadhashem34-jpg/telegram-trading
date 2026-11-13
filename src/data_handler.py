@@ -29,8 +29,13 @@ class MarketDataHandler:
     async def get_market_data(self, symbol):
         try:
             category = "linear"
+            
             kline_4h = self.session.get_kline(category=category, symbol=symbol, interval="240", limit=60)['result']['list']
+            await asyncio.sleep(0.5) 
+            
             kline_1h = self.session.get_kline(category=category, symbol=symbol, interval="60", limit=50)['result']['list']
+            await asyncio.sleep(0.5)
+            
             kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=50)['result']['list']
 
             kline_4h = kline_4h[1:]; kline_1h = kline_1h[1:]; kline_15m = kline_15m[1:]
@@ -47,6 +52,9 @@ class MarketDataHandler:
             h1_lows = [float(k[3]) for k in k1h]
             h1_closes = [float(k[4]) for k in k1h]
             h1_opens = [float(k[1]) for k in k1h]
+            
+            # محاسبه ATR برای تایم 1 ساعته
+            h1_atr = self._calculate_atr(h1_highs, h1_lows, h1_closes)
 
             m15_closes = [float(k[4]) for k in k15m]
             m15_highs = [float(k[2]) for k in k15m]
@@ -55,7 +63,7 @@ class MarketDataHandler:
 
             return {
                 'h4': { 'close': h4_closes[-1], 'highs': h4_highs, 'lows': h4_lows, 'opens': h4_opens, 'closes': h4_closes, 'ema_200': ema_200_4h },
-                'h1': { 'close': h1_closes[-1], 'highs': h1_highs, 'lows': h1_lows, 'opens': h1_opens, 'closes': h1_closes },
+                'h1': { 'close': h1_closes[-1], 'highs': h1_highs, 'lows': h1_lows, 'opens': h1_opens, 'closes': h1_closes, 'atr': h1_atr },
                 'm15': { 'close': m15_closes[-1], 'high': m15_highs[-1], 'low': m15_lows[-1], 'open': float(k15m[-1][1]), 'atr': atr_15m }
             }
         except Exception as e:
