@@ -1,8 +1,16 @@
 import asyncio
+from datetime import datetime, timezone
 from pybit.unified_trading import HTTP
 from logger import get_trading_logger
 
 logger = get_trading_logger()
+
+# ===================== تنظیمات =====================
+CANDLES_4H = 400        # تعداد کندل بسته‌شده ۴ ساعته (حدود ۶۷ روز)
+ATR_PERIOD = 14
+EMA_PERIOD = 200
+H4_MS = 4 * 60 * 60 * 1000
+
 
 class MarketDataHandler:
     def __init__(self):
@@ -13,58 +21,81 @@ class MarketDataHandler:
         while True:
             await asyncio.sleep(60)
 
-    def _calculate_ema(self, prices, period):
-        if len(prices) < period: return prices[-1] if prices else 0
-        multiplier = 2 / (period + 1)
-        ema = sum(prices[:period]) / period
-        for price in prices[period:]:
+    @staticmethod
+    def _calculate_ema(prices, period):
+        """EMA واقعی. اگر دیتا کمتر از period باشد، با دیتای موجود محاسبه و period واقعی برگردانده می‌شود."""
+        if not prices:
+            return 0.0, 0
+        used = min(period, len(prices))
+        multiplier = 2 / (used + 1)
+        ema = sum(prices[:used]) / used
+        for price in prices[used:]:
             ema = (price - ema) * multiplier + ema
-        return ema
+        return ema, used
 
-    def _calculate_atr(self, highs, lows, closes, period=14):
-        if len(closes) < period + 1: return 0
-        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1])) for i in range(1, len(closes))]
+    @staticmethod
+    def _calculate_atr(highs, lows, closes, period=ATR_PERIOD):
+        if len(closes) < period + 1:
+            return 0.0
+        trs = [
+            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            for i in range(1, len(closes))
+        ]
         return sum(trs[-period:]) / period
 
     async def get_market_data(self, symbol):
         try:
-            category = "linear"
-            
-            kline_4h = self.session.get_kline(category=category, symbol=symbol, interval="240", limit=60)['result']['list']
-            await asyncio.sleep(0.3)
-            kline_1h = self.session.get_kline(category=category, symbol=symbol, interval="60", limit=50)['result']['list']
-            await asyncio.sleep(0.3)
-            kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=50)['result']['list']
+            # pybit همزمان (sync) است؛ در thread اجرا می‌شود تا event loop بلاک نشود
+            resp = await asyncio.to_thread(
+                self.session.get_kline,
+                category="linear",
+                symbol=symbol,
+                interval="240",
+                limit=CANDLES_4H + 1,
+            )
 
-            kline_4h = kline_4h[1:]; kline_1h = kline_1h[1:]; kline_15m = kline_15m[1:]
-            k4h = kline_4h[::-1]; k1h = kline_1h[::-1]; k15m = kline_15m[::-1]
-            if not k4h or not k1h or not k15m: return None
+            if resp.get('retCode', 0) != 0:
+                logger.log_system_event(f"Bybit error for {symbol}: {resp.get('retMsg')}")
+                return None
 
-            h4_closes = [float(k[4]) for k in k4h]
-            h4_highs = [float(k[2]) for k in k4h]
-            h4_lows = [float(k[3]) for k in k4h] # 🟢 این خط اضافه شد
-            ema_200_4h = self._calculate_ema(h4_closes, min(200, len(h4_closes)))
+            rows = resp['result']['list']
+            if not rows:
+                logger.log_system_event(f"No 4H candles returned for {symbol}")
+                return None
 
-            h1_highs = [float(k[2]) for k in k1h]
-            h1_lows = [float(k[3]) for k in k1h]
-            h1_closes = [float(k[4]) for k in k1h]
-            h1_atr = self._calculate_atr(h1_highs, h1_lows, h1_closes)
+            # فقط کندل‌های کاملاً بسته‌شده (شروع + ۴ ساعت <= الان)
+            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            rows = [r for r in rows if int(r[0]) + H4_MS <= now_ms]
+            rows.sort(key=lambda r: int(r[0]))  # قدیمی -> جدید
 
-            m15_closes = [float(k[4]) for k in k15m]
-            m15_highs = [float(k[2]) for k in k15m]
-            m15_lows = [float(k[3]) for k in k15m]
-            atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
+            if len(rows) < 50:
+                logger.log_system_event(f"Too few closed 4H candles for {symbol}: {len(rows)}")
+                return None
+
+            times = [int(r[0]) for r in rows]
+            opens = [float(r[1]) for r in rows]
+            highs = [float(r[2]) for r in rows]
+            lows = [float(r[3]) for r in rows]
+            closes = [float(r[4]) for r in rows]
+            volumes = [float(r[5]) for r in rows]
+
+            ema_200, ema_used = self._calculate_ema(closes, EMA_PERIOD)
+            atr = self._calculate_atr(highs, lows, closes)
 
             return {
-                'h4': { 
-                    'close': h4_closes[-1], 
-                    'highs': h4_highs, 
-                    'lows': h4_lows, # 🟢 این خط اضافه شد
-                    'closes': h4_closes, 
-                    'ema_200': ema_200_4h 
-                },
-                'h1': { 'close': h1_closes[-1], 'atr': h1_atr },
-                'm15': { 'close': m15_closes[-1], 'high': m15_highs[-1], 'low': m15_lows[-1], 'open': float(k15m[-1][1]), 'atr': atr_15m }
+                'h4': {
+                    'times': times,
+                    'opens': opens,
+                    'highs': highs,
+                    'lows': lows,
+                    'closes': closes,
+                    'volumes': volumes,
+                    'close': closes[-1],
+                    'ema_200': ema_200,
+                    'ema_period_used': ema_used,
+                    'atr': atr,
+                    'count': len(rows),
+                }
             }
         except Exception as e:
             logger.log_system_event(f"Error fetching data for {symbol}: {e}")
