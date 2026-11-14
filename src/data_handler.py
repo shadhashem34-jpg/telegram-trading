@@ -31,11 +31,9 @@ class MarketDataHandler:
             category = "linear"
             
             kline_4h = self.session.get_kline(category=category, symbol=symbol, interval="240", limit=60)['result']['list']
-            await asyncio.sleep(0.5) 
-            
+            await asyncio.sleep(0.3)
             kline_1h = self.session.get_kline(category=category, symbol=symbol, interval="60", limit=50)['result']['list']
-            await asyncio.sleep(0.5)
-            
+            await asyncio.sleep(0.3)
             kline_15m = self.session.get_kline(category=category, symbol=symbol, interval="15", limit=50)['result']['list']
 
             kline_4h = kline_4h[1:]; kline_1h = kline_1h[1:]; kline_15m = kline_15m[1:]
@@ -45,15 +43,11 @@ class MarketDataHandler:
             h4_closes = [float(k[4]) for k in k4h]
             h4_highs = [float(k[2]) for k in k4h]
             h4_lows = [float(k[3]) for k in k4h]
-            h4_opens = [float(k[1]) for k in k4h]
             ema_200_4h = self._calculate_ema(h4_closes, min(200, len(h4_closes)))
 
             h1_highs = [float(k[2]) for k in k1h]
             h1_lows = [float(k[3]) for k in k1h]
             h1_closes = [float(k[4]) for k in k1h]
-            h1_opens = [float(k[1]) for k in k1h]
-            
-            # محاسبه ATR برای تایم 1 ساعته
             h1_atr = self._calculate_atr(h1_highs, h1_lows, h1_closes)
 
             m15_closes = [float(k[4]) for k in k15m]
@@ -62,8 +56,8 @@ class MarketDataHandler:
             atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
 
             return {
-                'h4': { 'close': h4_closes[-1], 'highs': h4_highs, 'lows': h4_lows, 'opens': h4_opens, 'closes': h4_closes, 'ema_200': ema_200_4h },
-                'h1': { 'close': h1_closes[-1], 'highs': h1_highs, 'lows': h1_lows, 'opens': h1_opens, 'closes': h1_closes, 'atr': h1_atr },
+                'h4': { 'close': h4_closes[-1], 'highs': h4_highs, 'closes': h4_closes, 'ema_200': ema_200_4h },
+                'h1': { 'close': h1_closes[-1], 'atr': h1_atr },
                 'm15': { 'close': m15_closes[-1], 'high': m15_highs[-1], 'low': m15_lows[-1], 'open': float(k15m[-1][1]), 'atr': atr_15m }
             }
         except Exception as e:
