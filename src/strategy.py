@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V25.1 - Tight SMC Order Blocks)")
+        logger.log_system_event("Strategy Initialized (Golden V26 - Dynamic Levels)")
 
     async def start_monitoring(self):
         self.running = True
@@ -40,33 +40,44 @@ class StrategyManager:
         self.running = False
         logger.log_system_event("StrategyManager stopped")
 
-    def _get_order_blocks(self, highs, lows, opens, closes, atr):
-        """پیدا کردن اوردر بلاک‌ها با ضخامت زون خیلی باریک"""
-        valid_res_zones = []
-        valid_sup_zones = []
+    def _find_nearest_levels(self, highs, lows, closes, current_price, atr):
+        """
+        پیدا کردن تمام سقف و کف‌های واضح (Swing Points) و انتخاب نزدیک‌ترین‌ها
+        """
+        swing_points = []
         
-        # 🟢 فقط همین خط تغییر کرد: 0.5 به 0.1 تغییر کرد
-        buffer = atr * 0.1 
-        min_displacement = atr * 1.5 
+        # پیدا کردن پیوت‌ها (۲ کندل چپ و راست)
+        for i in range(2, len(highs) - 2):
+            # سقف واضح
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                swing_points.append({'type': 'high', 'level': closes[i]}) # استفاده از بدنه
+            # کف واضح
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                swing_points.append({'type': 'low', 'level': closes[i]})
 
-        for i in range(2, len(closes) - 2):
-            next_candle_body = abs(closes[i+1] - opens[i+1])
-            is_displacement = next_candle_body > min_displacement
+        if not swing_points:
+            return None, None
 
-            if not is_displacement:
-                continue
+        # ضخامت زون خیلی باریک (0.1 ATR)
+        buffer = atr * 0.1
 
-            # ناحیه فروش
-            if closes[i] > opens[i] and closes[i+1] < opens[i+1] and closes[i+1] < closes[i]:
-                base_close = closes[i]
-                valid_res_zones.append({'bottom': base_close, 'top': base_close + buffer, 'base': base_close})
-
-            # ناحیه خرید
-            if closes[i] < opens[i] and closes[i+1] > opens[i+1] and closes[i+1] > closes[i]:
-                base_close = closes[i]
-                valid_sup_zones.append({'top': base_close, 'bottom': base_close - buffer, 'base': base_close})
-
-        return valid_res_zones, valid_sup_zones
+        # پیدا کردن نزدیک‌ترین مقاومت (هر سطحی که بالای قیمت فعلی است - شامل کف‌های شکسته شده)
+        res_candidates = [p for p in swing_points if p['level'] > current_price]
+        nearest_res = None
+        if res_candidates:
+            nearest_res = min(res_candidates, key=lambda x: x['level'])
+            nearest_res['zone_bottom'] = nearest_res['level']
+            nearest_res['zone_top'] = nearest_res['level'] + buffer
+        
+        # پیدا کردن نزدیک‌ترین حمایت (هر سطحی که زیر قیمت فعلی است)
+        sup_candidates = [p for p in swing_points if p['level'] < current_price]
+        nearest_sup = None
+        if sup_candidates:
+            nearest_sup = max(sup_candidates, key=lambda x: x['level'])
+            nearest_sup['zone_top'] = nearest_sup['level']
+            nearest_sup['zone_bottom'] = nearest_sup['level'] - buffer
+            
+        return nearest_res, nearest_sup
 
     async def generate_signal(self, symbol: str, market_data: dict) -> Optional[dict]:
         if self.signals_today >= self.max_daily_signals: return None
@@ -84,78 +95,40 @@ class StrategyManager:
         m15_high = m15.get('high', 0)
         m15_low = m15.get('low', 0)
         m15_open = m15.get('open', 0)
-        atr_15m = m15.get('atr', 0.0010)
-        h1_atr = h1.get('atr', 0.0010)
+        h1_atr = h1.get('atr', 0.0010) # استفاده از ATR 1H برای زون‌ها
 
-        # پیدا کردن اوردر بلاک‌ها با ATR تایم ۱ ساعته
-        h4_res_zones, h4_sup_zones = self._get_order_blocks(h4.get('highs', []), h4.get('lows', []), h4.get('opens', []), h4.get('closes', []), h1_atr * 2)
-        h1_res_zones, h1_sup_zones = self._get_order_blocks(h1.get('highs', []), h1.get('lows', []), h1.get('opens', []), h1.get('closes', []), h1_atr)
+        # پیدا کردن سطوح از تایم ۱ ساعته (برای دقت بیشتر در ترید روزانه)
+        nearest_res, nearest_sup = self._find_nearest_levels(
+            h1.get('highs', []), h1.get('lows', []), h1.get('closes', []), m15_close, h1_atr
+        )
 
-        # انتخاب نزدیک‌ترین اوردر بلاک‌ها
-        valid_h4_res = [z for z in h4_res_zones if z['base'] > m15_close]
-        valid_h4_sup = [z for z in h4_sup_zones if z['base'] < m15_close]
-        nearest_h4_res = min(valid_h4_res, key=lambda x: x['base']) if valid_h4_res else None
-        nearest_h4_sup = max(valid_h4_sup, key=lambda x: x['base']) if valid_h4_sup else None
-
-        valid_h1_res = [z for z in h1_res_zones if z['base'] > m15_close]
-        valid_h1_sup = [z for z in h1_sup_zones if z['base'] < m15_close]
-        nearest_h1_res = min(valid_h1_res, key=lambda x: x['base']) if valid_h1_res else None
-        nearest_h1_sup = max(valid_h1_sup, key=lambda x: x['base']) if valid_h1_sup else None
-
-        # لاگ‌گیری
-        logger.log_system_event(f"📡 [V25.1 RADAR] {symbol} | Price: {m15_close:.2f}")
-        if nearest_h4_res: logger.log_system_event(f"   ↳ 4H OB Res: {nearest_h4_res['bottom']:.2f} - {nearest_h4_res['top']:.2f} (Body: {nearest_h4_res['base']:.2f})")
-        if nearest_h4_sup: logger.log_system_event(f"   ↳ 4H OB Sup: {nearest_h4_sup['bottom']:.2f} - {nearest_h4_sup['top']:.2f} (Body: {nearest_h4_sup['base']:.2f})")
-        if nearest_h1_res: logger.log_system_event(f"   ↳ 1H OB Res: {nearest_h1_res['bottom']:.2f} - {nearest_h1_res['top']:.2f} (Body: {nearest_h1_res['base']:.2f})")
-        if nearest_h1_sup: logger.log_system_event(f"   ↳ 1H OB Sup: {nearest_h1_sup['bottom']:.2f} - {nearest_h1_sup['top']:.2f} (Body: {nearest_h1_sup['base']:.2f})")
-
-        # تشخیص شکست
-        h1_close = h1.get('close', 0)
+        # لاگ‌گیری دقیق (نمایش نزدیک‌ترین سطح در هر لحظه)
+        res_str = f"{nearest_res['level']:.2f} (Zone: {nearest_res['zone_bottom']:.2f}-{nearest_res['zone_top']:.2f})" if nearest_res else "None"
+        sup_str = f"{nearest_sup['level']:.2f} (Zone: {nearest_sup['zone_bottom']:.2f}-{nearest_sup['zone_top']:.2f})" if nearest_sup else "None"
         
-        if is_downtrend:
-            if nearest_h4_sup and h1_close < nearest_h4_sup['bottom'] and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'zone': nearest_h4_sup, 'time': now, 'tf': '4H'}
-                logger.log_system_event(f"📝 [V25.1] 4H OB Breakdown below {nearest_h4_sup['bottom']:.2f}. LOCKED.")
-            elif nearest_h1_sup and h1_close < nearest_h1_sup['bottom'] and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'zone': nearest_h1_sup, 'time': now, 'tf': '1H'}
-                logger.log_system_event(f"📝 [V25.1] 1H OB Breakdown below {nearest_h1_sup['bottom']:.2f}. LOCKED.")
+        logger.log_system_event(f"📡 [V26 RADAR] {symbol} | Price: {m15_close:.2f}")
+        logger.log_system_event(f"   ↳ Nearest Res: {res_str}")
+        logger.log_system_event(f"   ↳ Nearest Sup: {sup_str}")
 
-        elif is_uptrend:
-            if nearest_h4_res and h1_close > nearest_h4_res['top'] and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'zone': nearest_h4_res, 'time': now, 'tf': '4H'}
-                logger.log_system_event(f"📝 [V25.1] 4H OB Breakout above {nearest_h4_res['top']:.2f}. LOCKED.")
-            elif nearest_h1_res and h1_close > nearest_h1_res['top'] and symbol not in self.watchlist:
-                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'zone': nearest_h1_res, 'time': now, 'tf': '1H'}
-                logger.log_system_event(f"📝 [V25.1] 1H OB Breakout above {nearest_h1_res['top']:.2f}. LOCKED.")
+        # 🎯 منطق ورود (ترکیب سویپ و پولبک روی نزدیک‌ترین سطح)
+        signal_type = None
+        
+        if is_downtrend and nearest_res:
+            # اگر قیمت به زون مقاومت رسید و کندل 15 دقیقه‌ای سایه بالا زد و قرمز بسته شد
+            if m15_high >= nearest_res['zone_bottom'] and m15_close < nearest_res['zone_bottom'] and m15_close < m15_open:
+                signal_type = "SELL"
+                stop_loss = m15_high + (m15.get('atr', 0.0010) * 0.5)
+                take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
 
-        # شکار پولبک
-        if symbol in self.watchlist:
-            watch = self.watchlist[symbol]
-            time_diff = (now - watch['time']).total_seconds() / 3600
-            
-            if time_diff > 8: 
-                del self.watchlist[symbol]
-                return None
-
-            zone = watch['zone']
-            signal_type = None
-
-            if watch['type'] == 'SELL_RETEST' and is_downtrend:
-                if m15_high >= zone['base'] and m15_close < zone['base'] and m15_close < m15_open:
-                    signal_type = "SELL"
-                    stop_loss = m15_high + (atr_15m * 0.5)
-                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
-                    del self.watchlist[symbol]
-
-            elif watch['type'] == 'BUY_RETEST' and is_uptrend:
-                if m15_low <= zone['base'] and m15_close > zone['base'] and m15_close > m15_open:
-                    signal_type = "BUY"
-                    stop_loss = m15_low - (atr_15m * 0.5)
-                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
-                    del self.watchlist[symbol]
+        elif is_uptrend and nearest_sup:
+            # اگر قیمت به زون حمایت رسید و کندل 15 دقیقه‌ای سایه پایین زد و سبز بسته شد
+            if m15_low <= nearest_sup['zone_top'] and m15_close > nearest_sup['zone_top'] and m15_close > m15_open:
+                signal_type = "BUY"
+                stop_loss = m15_low - (m15.get('atr', 0.0010) * 0.5)
+                take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
 
         # نهایی‌سازی سیگنال
-        if 'signal_type' in locals() and signal_type:
+        if signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
 
@@ -168,8 +141,8 @@ class StrategyManager:
                 'take_profit_1': round(take_profit, 4), 
                 'take_profit_2': 0, 
                 'take_profit_3': 0,
-                'strategy': 'Golden_V25.1'
+                'strategy': 'Golden_V26'
             }
-            logger.log_system_event(f"🏆 GOLDEN V25.1 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V26 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
