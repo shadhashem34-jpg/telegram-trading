@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V30.1 - Final Fix)")
+        logger.log_system_event("Strategy Initialized (Golden V30.2 - Full Logging)")
 
     async def start_monitoring(self):
         self.running = True
@@ -31,6 +31,8 @@ class StrategyManager:
                             if signal:
                                 if self.telegram_bot:
                                     await self.telegram_bot.send_signal(signal)
+                        else:
+                            logger.log_system_event(f"❌ [V30.2] {symbol} | Data is None (API issue).")
                 except Exception as e:
                     logger.log_system_event(f"Error scanning {symbol}: {e}")
                 await asyncio.sleep(30) 
@@ -41,23 +43,19 @@ class StrategyManager:
         logger.log_system_event("StrategyManager stopped")
 
     def _find_levels(self, highs, lows, closes, current_price, is_uptrend):
-        # شرط ایمنی: اگر دیتای کافی نبود، ارور نده
         if len(highs) < 5 or len(lows) < 5 or len(closes) < 5:
             return None, None
 
         levels = []
         for i in range(2, len(highs) - 2):
             if is_uptrend:
-                # پیدا کردن سقف‌ها
                 if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
                     levels.append(closes[i])
             else:
-                # پیدا کردن کف‌ها
                 if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
                     levels.append(closes[i])
         
-        if not levels: 
-            return None, None
+        if not levels: return None, None
         
         if is_uptrend:
             valid_levels = sorted([l for l in levels if l > current_price])
@@ -96,14 +94,18 @@ class StrategyManager:
         m15_atr = m15.get('atr', 0.0010)
         h1_close = h1.get('close', 0)
 
+        # 🟢 لاگ ۱: همیشه چاپ میشه (قبل از هر شرطی)
+        logger.log_system_event(f"📡 [V30.2 RADAR] {symbol} | Price: {m15_close:.2f}")
+
         # پیدا کردن دو سطح نزدیک
         lvl1, lvl2 = self._find_levels(h4.get('highs', []), h4.get('lows', []), h4.get('closes', []), m15_close, is_uptrend)
 
+        # 🟢 لاگ ۲: اگر سطحی پیدا نشد، دلیلش رو بگو
         if not lvl1: 
+            logger.log_system_event(f"   ↳ No valid levels found for {symbol}.")
             return None
         
-        # لاگ‌گیری شفاف
-        logger.log_system_event(f"📡 [V30.1 RADAR] {symbol} | Price: {m15_close:.2f}")
+        # 🟢 لاگ ۳: سطوحی که پیدا شد رو نشون بده
         if is_downtrend:
             logger.log_system_event(f"   ↳ Nearest Sup (1): {lvl1:.2f} | Next Sup (2): {lvl2 if lvl2 else 'None'}")
         else:
@@ -116,32 +118,27 @@ class StrategyManager:
         # 🎯 منطق ورود
         if symbol not in self.watchlist:
             if is_downtrend:
-                # حالت ۱: ریجکشن از سطح دوم (وسطی)
                 if lvl2 and m15_high >= lvl2 and m15_close < lvl2 and m15_close < m15_open:
                     signal_type = "SELL"
                     stop_loss = m15_high + (m15_atr * 0.5)
                     take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
                 
-                # حالت ۲: شکست سطح اول (پایینی) و قفل کردن
                 elif h1_close < lvl1:
                     self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': lvl1, 'time': now}
-                    logger.log_system_event(f"📝 [V30.1] 1H Body Breakdown below {lvl1:.2f}. Level LOCKED. Waiting for Retest...")
+                    logger.log_system_event(f"📝 [V30.2] 1H Body Breakdown below {lvl1:.2f}. Level LOCKED. Waiting for Retest...")
                     return None
 
             elif is_uptrend:
-                # حالت ۱: ریجکشن از سطح دوم
                 if lvl2 and m15_low <= lvl2 and m15_close > lvl2 and m15_close > m15_open:
                     signal_type = "BUY"
                     stop_loss = m15_low - (m15_atr * 0.5)
                     take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
                 
-                # حالت ۲: شکست سطح اول و قفل کردن
                 elif h1_close > lvl1:
                     self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': lvl1, 'time': now}
-                    logger.log_system_event(f"📝 [V30.1] 1H Body Breakout above {lvl1:.2f}. Level LOCKED. Waiting for Retest...")
+                    logger.log_system_event(f"📝 [V30.2] 1H Body Breakout above {lvl1:.2f}. Level LOCKED. Waiting for Retest...")
                     return None
         else:
-            # بررسی پولبک به سطح قفل شده
             watch = self.watchlist[symbol]
             time_diff = (now - watch['time']).total_seconds() / 3600
             if time_diff > 8:
@@ -179,9 +176,9 @@ class StrategyManager:
                 'take_profit_1': round(take_profit, 4), 
                 'take_profit_2': 0, 
                 'take_profit_3': 0,
-                'strategy': 'Golden_V30.1'
+                'strategy': 'Golden_V30.2'
             }
-            logger.log_system_event(f"🏆 GOLDEN V30.1 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V30.2 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         
         return None
