@@ -55,7 +55,8 @@ class StrategyManager:
                 if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
                     levels.append(closes[i])
         
-        if not levels: return None, None
+        if not levels: 
+            return None, None
         
         if is_uptrend:
             valid_levels = sorted([l for l in levels if l > current_price])
@@ -94,18 +95,14 @@ class StrategyManager:
         m15_atr = m15.get('atr', 0.0010)
         h1_close = h1.get('close', 0)
 
-        # 🟢 لاگ ۱: همیشه چاپ میشه (قبل از هر شرطی)
         logger.log_system_event(f"📡 [V30.2 RADAR] {symbol} | Price: {m15_close:.2f}")
 
-        # پیدا کردن دو سطح نزدیک
         lvl1, lvl2 = self._find_levels(h4.get('highs', []), h4.get('lows', []), h4.get('closes', []), m15_close, is_uptrend)
 
-        # 🟢 لاگ ۲: اگر سطحی پیدا نشد، دلیلش رو بگو
         if not lvl1: 
             logger.log_system_event(f"   ↳ No valid levels found for {symbol}.")
             return None
         
-        # 🟢 لاگ ۳: سطوحی که پیدا شد رو نشون بده
         if is_downtrend:
             logger.log_system_event(f"   ↳ Nearest Sup (1): {lvl1:.2f} | Next Sup (2): {lvl2 if lvl2 else 'None'}")
         else:
@@ -115,7 +112,6 @@ class StrategyManager:
         stop_loss = 0
         take_profit = 0
 
-        # 🎯 منطق ورود
         if symbol not in self.watchlist:
             if is_downtrend:
                 if lvl2 and m15_high >= lvl2 and m15_close < lvl2 and m15_close < m15_open:
@@ -159,7 +155,6 @@ class StrategyManager:
                     take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
                     del self.watchlist[symbol]
 
-        # نهایی‌سازی سیگنال
         if signal_type:
             if symbol != "XAUUSDT" and self.last_crypto_signal_time:
                 if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: 
