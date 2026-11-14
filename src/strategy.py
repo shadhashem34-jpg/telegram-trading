@@ -14,7 +14,7 @@ class StrategyManager:
         self.market_data = None   
         self.last_crypto_signal_time = None 
         self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V26 - Dynamic Levels)")
+        logger.log_system_event("Strategy Initialized (Golden V26.1 - 4H Levels Only)")
 
     async def start_monitoring(self):
         self.running = True
@@ -42,16 +42,15 @@ class StrategyManager:
 
     def _find_nearest_levels(self, highs, lows, closes, current_price, atr):
         """
-        پیدا کردن تمام سقف و کف‌های واضح (Swing Points) و انتخاب نزدیک‌ترین‌ها
+        پیدا کردن تمام سقف و کف‌های واضح در تایم ۴ ساعته
         """
         swing_points = []
         
-        # پیدا کردن پیوت‌ها (۲ کندل چپ و راست)
         for i in range(2, len(highs) - 2):
-            # سقف واضح
+            # سقف واضح 4 ساعته
             if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                swing_points.append({'type': 'high', 'level': closes[i]}) # استفاده از بدنه
-            # کف واضح
+                swing_points.append({'type': 'high', 'level': closes[i]}) 
+            # کف واضح 4 ساعته
             if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
                 swing_points.append({'type': 'low', 'level': closes[i]})
 
@@ -61,7 +60,7 @@ class StrategyManager:
         # ضخامت زون خیلی باریک (0.1 ATR)
         buffer = atr * 0.1
 
-        # پیدا کردن نزدیک‌ترین مقاومت (هر سطحی که بالای قیمت فعلی است - شامل کف‌های شکسته شده)
+        # نزدیک‌ترین مقاومت 4 ساعته (بالای قیمت)
         res_candidates = [p for p in swing_points if p['level'] > current_price]
         nearest_res = None
         if res_candidates:
@@ -69,7 +68,7 @@ class StrategyManager:
             nearest_res['zone_bottom'] = nearest_res['level']
             nearest_res['zone_top'] = nearest_res['level'] + buffer
         
-        # پیدا کردن نزدیک‌ترین حمایت (هر سطحی که زیر قیمت فعلی است)
+        # نزدیک‌ترین حمایت 4 ساعته (زیر قیمت)
         sup_candidates = [p for p in swing_points if p['level'] < current_price]
         nearest_sup = None
         if sup_candidates:
@@ -83,9 +82,8 @@ class StrategyManager:
         if self.signals_today >= self.max_daily_signals: return None
 
         h4 = market_data.get('h4', {})
-        h1 = market_data.get('h1', {})
         m15 = market_data.get('m15', {})
-        if not h4 or not h1 or not m15: return None
+        if not h4 or not m15: return None
 
         is_uptrend = h4.get('close', 0) > h4.get('ema_200', 0)
         is_downtrend = h4.get('close', 0) < h4.get('ema_200', 0)
@@ -95,36 +93,35 @@ class StrategyManager:
         m15_high = m15.get('high', 0)
         m15_low = m15.get('low', 0)
         m15_open = m15.get('open', 0)
-        h1_atr = h1.get('atr', 0.0010) # استفاده از ATR 1H برای زون‌ها
+        m15_atr = m15.get('atr', 0.0010)
 
-        # پیدا کردن سطوح از تایم ۱ ساعته (برای دقت بیشتر در ترید روزانه)
+        # 🟢 تغییر اصلی: استفاده از دیتای تایم ۴ ساعته برای پیدا کردن سطوح
+        # برای ATR هم چون ATR 4 ساعته رو نداریم، از ATR 15 دقیقه ضربدر 4 استفاده می‌کنیم (تقریب نوسان)
         nearest_res, nearest_sup = self._find_nearest_levels(
-            h1.get('highs', []), h1.get('lows', []), h1.get('closes', []), m15_close, h1_atr
+            h4.get('highs', []), h4.get('lows', []), h4.get('closes', []), m15_close, m15_atr * 4
         )
 
-        # لاگ‌گیری دقیق (نمایش نزدیک‌ترین سطح در هر لحظه)
+        # لاگ‌گیری دقیق (حالا سطوح 4 ساعته رو نشون میده)
         res_str = f"{nearest_res['level']:.2f} (Zone: {nearest_res['zone_bottom']:.2f}-{nearest_res['zone_top']:.2f})" if nearest_res else "None"
         sup_str = f"{nearest_sup['level']:.2f} (Zone: {nearest_sup['zone_bottom']:.2f}-{nearest_sup['zone_top']:.2f})" if nearest_sup else "None"
         
-        logger.log_system_event(f"📡 [V26 RADAR] {symbol} | Price: {m15_close:.2f}")
-        logger.log_system_event(f"   ↳ Nearest Res: {res_str}")
-        logger.log_system_event(f"   ↳ Nearest Sup: {sup_str}")
+        logger.log_system_event(f"📡 [V26.1 RADAR] {symbol} | Price: {m15_close:.2f}")
+        logger.log_system_event(f"   ↳ 4H Nearest Res: {res_str}")
+        logger.log_system_event(f"   ↳ 4H Nearest Sup: {sup_str}")
 
-        # 🎯 منطق ورود (ترکیب سویپ و پولبک روی نزدیک‌ترین سطح)
+        # 🎯 منطق ورود (تاییدیه در تایم ۱۵ دقیقه)
         signal_type = None
         
         if is_downtrend and nearest_res:
-            # اگر قیمت به زون مقاومت رسید و کندل 15 دقیقه‌ای سایه بالا زد و قرمز بسته شد
             if m15_high >= nearest_res['zone_bottom'] and m15_close < nearest_res['zone_bottom'] and m15_close < m15_open:
                 signal_type = "SELL"
-                stop_loss = m15_high + (m15.get('atr', 0.0010) * 0.5)
+                stop_loss = m15_high + (m15_atr * 0.5)
                 take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
 
         elif is_uptrend and nearest_sup:
-            # اگر قیمت به زون حمایت رسید و کندل 15 دقیقه‌ای سایه پایین زد و سبز بسته شد
             if m15_low <= nearest_sup['zone_top'] and m15_close > nearest_sup['zone_top'] and m15_close > m15_open:
                 signal_type = "BUY"
-                stop_loss = m15_low - (m15.get('atr', 0.0010) * 0.5)
+                stop_loss = m15_low - (m15_atr * 0.5)
                 take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
 
         # نهایی‌سازی سیگنال
@@ -141,8 +138,8 @@ class StrategyManager:
                 'take_profit_1': round(take_profit, 4), 
                 'take_profit_2': 0, 
                 'take_profit_3': 0,
-                'strategy': 'Golden_V26'
+                'strategy': 'Golden_V26.1'
             }
-            logger.log_system_event(f"🏆 GOLDEN V26 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+            logger.log_system_event(f"🏆 GOLDEN V26.1 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
             return signal
         return None
