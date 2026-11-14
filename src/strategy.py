@@ -13,8 +13,8 @@ class StrategyManager:
         self.telegram_bot = None  
         self.market_data = None   
         self.last_crypto_signal_time = None 
-        self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V28 - Final Simple Strategy)")
+        self.watchlist = {} # حافظه برای قفل کردن سطح
+        logger.log_system_event("Strategy Initialized (Golden V29 - Full Log & Level Lock)")
 
     async def start_monitoring(self):
         self.running = True
@@ -66,70 +66,93 @@ class StrategyManager:
         
         max_close = max(recent_closes)
         min_close = min(recent_closes)
-
-        # ۳. انتخاب نزدیک‌ترین سطح برای شکست
-        # در روند صعودی: نزدیک‌ترین سقف (بالاترین بدنه) بالای قیمت
-        # در روند نزولی: نزدیک‌ترین کف (پایین‌ترین بدنه) زیر قیمت
         
+        # ساخت زون باریک (0.1 ATR) برای نمایش در لاگ
+        buffer = m15_atr * 0.1
+        res_zone = f"{max_close:.2f} - {max_close + buffer:.2f}"
+        sup_zone = f"{min_close - buffer:.2f} - {min_close:.2f}"
+
+        # 🟢 لاگ ۱: نمایش قیمت لحظه‌ای و زون‌های ۴ ساعته
+        logger.log_system_event(f"📡 [V29 RADAR] {symbol} | Price: {m15_close:.2f}")
+        logger.log_system_event(f"   ↳ 4H Res Zone: {res_zone}")
+        logger.log_system_event(f"   ↳ 4H Sup Zone: {sup_zone}")
+
         target_level = None
         trade_type = None
         
         if is_uptrend:
             valid_highs = [c for c in recent_closes if c > m15_close]
             if valid_highs:
-                target_level = min(valid_highs) # نزدیک‌ترین سقف
+                target_level = min(valid_highs)
                 trade_type = "BUY"
         elif is_downtrend:
             valid_lows = [c for c in recent_closes if c < m15_close]
             if valid_lows:
-                target_level = max(valid_lows) # نزدیک‌ترین کف
+                target_level = max(valid_lows)
                 trade_type = "SELL"
 
         if not target_level: return None
 
-        # ۴. ساخت زون باریک (0.1 ATR)
-        buffer = m15_atr * 0.1
-        
-        # لاگ‌گیری
-        logger.log_system_event(f"📡 [V28 RADAR] {symbol} | Price: {m15_close:.2f} | Target: {target_level:.2f} ({trade_type})")
+        # 🟢 منطق قفل کردن سطح (Level Lock) در صورت شکست با بدنه ۱ ساعته
+        if symbol not in self.watchlist:
+            # برای فروش: اگر کندل ۱ ساعته با بدنه زیر سطح بسته شد
+            if trade_type == "SELL" and h1_close < target_level:
+                self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': target_level, 'time': now}
+                logger.log_system_event(f"📝 [V29] 1H Body Breakdown below {target_level:.2f}. Level LOCKED. Waiting for 15M retest...")
+                return None
+            # برای خرید: اگر کندل ۱ ساعته با بدنه بالای سطح بسته شد
+            elif trade_type == "BUY" and h1_close > target_level:
+                self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': target_level, 'time': now}
+                logger.log_system_event(f"📝 [V29] 1H Body Breakout above {target_level:.2f}. Level LOCKED. Waiting for 15M retest...")
+                return None
+            else:
+                # اگر هنوز شکستی رخ نداده، فقط لاگ می‌کنیم که منتظرشه
+                logger.log_system_event(f"   ↳ Waiting for 1H Body Break of {target_level:.2f} to LOCK...")
+                return None
 
-        # ۵. ماشه ورود (شکست، رد شدن، یا پولبک)
-        signal_type = None
-        stop_loss = 0
-        take_profit = 0
-
-        # حالت اول: قیمت به سطح رسید و رد شد (Rejection)
-        if trade_type == "SELL":
-            if m15_high >= target_level and m15_close < target_level and m15_close < m15_open:
-                signal_type = "SELL"
-                stop_loss = m15_high + (m15_atr * 0.5)
-                take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
-        
-        elif trade_type == "BUY":
-            if m15_low <= target_level and m15_close > target_level and m15_close > m15_open:
-                signal_type = "BUY"
-                stop_loss = m15_low - (m15_atr * 0.5)
-                take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
-
-        # حالت دوم: سطح با بدنه ۱ ساعته شکسته شد و حالا منتظر پولبک هستیم
-        # (برای سادگی، فعلاً همون حالت اول رو نگه می‌داریم که تایید پولبک/رد شدن در ۱۵ دقیقه هست)
-
-        # نهایی‌سازی سیگنال
-        if signal_type:
-            if symbol != "XAUUSDT" and self.last_crypto_signal_time:
-                if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
-
-            if symbol != "XAUUSDT": self.last_crypto_signal_time = now
-            self.signals_today += 1
+        # 🎯 شکار پولبک در تایم ۱۵ دقیقه (اگر سطح قفل شده باشد)
+        if symbol in self.watchlist:
+            watch = self.watchlist[symbol]
+            time_diff = (now - watch['time']).total_seconds() / 3600
             
-            signal = {
-                'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
-                'stop_loss': round(stop_loss, 4), 
-                'take_profit_1': round(take_profit, 4), 
-                'take_profit_2': 0, 
-                'take_profit_3': 0,
-                'strategy': 'Golden_V28'
-            }
-            logger.log_system_event(f"🏆 GOLDEN V28 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
-            return signal
+            if time_diff > 8: # انقضای ۸ ساعته
+                del self.watchlist[symbol]
+                return None
+
+            level = watch['level']
+            signal_type = None
+
+            if watch['type'] == 'SELL_RETEST' and is_downtrend:
+                # سایه بالا به سطح خورده و بدنه زیر سطح قرمز بسته شده
+                if m15_high >= level and m15_close < level and m15_close < m15_open:
+                    signal_type = "SELL"
+                    stop_loss = m15_high + (m15_atr * 0.5)
+                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
+                    del self.watchlist[symbol]
+
+            elif watch['type'] == 'BUY_RETEST' and is_uptrend:
+                if m15_low <= level and m15_close > level and m15_close > m15_open:
+                    signal_type = "BUY"
+                    stop_loss = m15_low - (m15_atr * 0.5)
+                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
+                    del self.watchlist[symbol]
+
+            # نهایی‌سازی سیگنال
+            if signal_type:
+                if symbol != "XAUUSDT" and self.last_crypto_signal_time:
+                    if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: return None 
+
+                if symbol != "XAUUSDT": self.last_crypto_signal_time = now
+                self.signals_today += 1
+                
+                signal = {
+                    'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
+                    'stop_loss': round(stop_loss, 4), 
+                    'take_profit_1': round(take_profit, 4), 
+                    'take_profit_2': 0, 
+                    'take_profit_3': 0,
+                    'strategy': 'Golden_V29'
+                }
+                logger.log_system_event(f"🏆 GOLDEN V29 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
+                return signal
         return None
