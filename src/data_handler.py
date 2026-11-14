@@ -42,7 +42,7 @@ class MarketDataHandler:
 
             h4_closes = [float(k[4]) for k in k4h]
             h4_highs = [float(k[2]) for k in k4h]
-            h4_lows = [float(k[3]) for k in k4h]
+            h4_lows = [float(k[3]) for k in k4h] # 🟢 این خط اضافه شد
             ema_200_4h = self._calculate_ema(h4_closes, min(200, len(h4_closes)))
 
             h1_highs = [float(k[2]) for k in k1h]
@@ -56,7 +56,13 @@ class MarketDataHandler:
             atr_15m = self._calculate_atr(m15_highs, m15_lows, m15_closes)
 
             return {
-                'h4': { 'close': h4_closes[-1], 'highs': h4_highs, 'closes': h4_closes, 'ema_200': ema_200_4h },
+                'h4': { 
+                    'close': h4_closes[-1], 
+                    'highs': h4_highs, 
+                    'lows': h4_lows, # 🟢 این خط اضافه شد
+                    'closes': h4_closes, 
+                    'ema_200': ema_200_4h 
+                },
                 'h1': { 'close': h1_closes[-1], 'atr': h1_atr },
                 'm15': { 'close': m15_closes[-1], 'high': m15_highs[-1], 'low': m15_lows[-1], 'open': float(k15m[-1][1]), 'atr': atr_15m }
             }
