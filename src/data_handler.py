@@ -1,21 +1,25 @@
 import asyncio
-from datetime import datetime, timezone
+import time
 from pybit.unified_trading import HTTP
 from logger import get_trading_logger
 
 logger = get_trading_logger()
 
 # ===================== تنظیمات =====================
-CANDLES_4H = 400        # تعداد کندل بسته‌شده ۴ ساعته (حدود ۶۷ روز)
+CANDLES_4H = 400          # تعداد کندل بسته‌شده ۴ ساعته (حدود ۶۷ روز)
 ATR_PERIOD = 14
 EMA_PERIOD = 200
 H4_MS = 4 * 60 * 60 * 1000
+CANDLE_GRACE_SEC = 15     # بعد از بسته شدن کندل جدید، چند ثانیه صبر کن تا بایبیت آپدیت کند
+RETRY_AFTER_FAIL_SEC = 90 # بعد از خطا چند ثانیه بعد دوباره تلاش کن
 
 
 class MarketDataHandler:
     def __init__(self):
         self.session = HTTP(testnet=False)
         self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
+        self._cache = {}        # symbol -> دیتای کندل‌های ۴ساعته (فقط وقتی کندل جدید بسته شد آپدیت می‌شود)
+        self._next_fetch = {}   # symbol -> زمان (epoch ثانیه) مجاز برای دریافت دوباره کندل‌ها
 
     async def start_data_collection(self):
         while True:
@@ -43,60 +47,90 @@ class MarketDataHandler:
         ]
         return sum(trs[-period:]) / period
 
+    async def _fetch_candles(self, symbol):
+        """کندل‌های ۴ساعته‌ی بسته‌شده را از بایبیت می‌گیرد. در صورت خطا None."""
+        # pybit همزمان (sync) است؛ در thread اجرا می‌شود تا event loop بلاک نشود
+        resp = await asyncio.to_thread(
+            self.session.get_kline,
+            category="linear",
+            symbol=symbol,
+            interval="240",
+            limit=CANDLES_4H + 1,
+        )
+        if resp.get('retCode', 0) != 0:
+            logger.log_system_event(f"Bybit error for {symbol}: {resp.get('retMsg')}")
+            return None
+
+        rows = resp['result']['list']
+        if not rows:
+            logger.log_system_event(f"No 4H candles returned for {symbol}")
+            return None
+
+        # فقط کندل‌های کاملاً بسته‌شده (شروع + ۴ ساعت <= الان)
+        now_ms = int(time.time() * 1000)
+        rows = [r for r in rows if int(r[0]) + H4_MS <= now_ms]
+        rows.sort(key=lambda r: int(r[0]))  # قدیمی -> جدید
+
+        if len(rows) < 50:
+            logger.log_system_event(f"Too few closed 4H candles for {symbol}: {len(rows)}")
+            return None
+
+        closes = [float(r[4]) for r in rows]
+        highs = [float(r[2]) for r in rows]
+        lows = [float(r[3]) for r in rows]
+        ema_200, ema_used = self._calculate_ema(closes, EMA_PERIOD)
+
+        return {
+            'times': [int(r[0]) for r in rows],
+            'opens': [float(r[1]) for r in rows],
+            'highs': highs,
+            'lows': lows,
+            'closes': closes,
+            'volumes': [float(r[5]) for r in rows],
+            'close': closes[-1],           # کلوز آخرین کندل بسته‌شده
+            'ema_200': ema_200,
+            'ema_period_used': ema_used,
+            'atr': self._calculate_atr(highs, lows, closes),
+            'count': len(rows),
+        }
+
+    async def _fetch_price(self, symbol):
+        """قیمت زنده (lastPrice). در صورت خطا None."""
+        try:
+            resp = await asyncio.to_thread(
+                self.session.get_tickers, category="linear", symbol=symbol
+            )
+            if resp.get('retCode', 0) != 0:
+                return None
+            lst = resp['result']['list']
+            return float(lst[0]['lastPrice']) if lst else None
+        except Exception as e:
+            logger.log_system_event(f"Ticker error for {symbol}: {e}")
+            return None
+
     async def get_market_data(self, symbol):
         try:
-            # pybit همزمان (sync) است؛ در thread اجرا می‌شود تا event loop بلاک نشود
-            resp = await asyncio.to_thread(
-                self.session.get_kline,
-                category="linear",
-                symbol=symbol,
-                interval="240",
-                limit=CANDLES_4H + 1,
-            )
+            now = time.time()
 
-            if resp.get('retCode', 0) != 0:
-                logger.log_system_event(f"Bybit error for {symbol}: {resp.get('retMsg')}")
+            # کندل ۴ساعته فقط وقتی کندل جدید بسته شده (یا بعد از خطا) دوباره گرفته می‌شود
+            if now >= self._next_fetch.get(symbol, 0):
+                candles = await self._fetch_candles(symbol)
+                if candles:
+                    self._cache[symbol] = candles
+                    next_close = (candles['times'][-1] + 2 * H4_MS) / 1000
+                    self._next_fetch[symbol] = next_close + CANDLE_GRACE_SEC
+                else:
+                    self._next_fetch[symbol] = now + RETRY_AFTER_FAIL_SEC
+
+            cached = self._cache.get(symbol)
+            if not cached:
                 return None
 
-            rows = resp['result']['list']
-            if not rows:
-                logger.log_system_event(f"No 4H candles returned for {symbol}")
-                return None
-
-            # فقط کندل‌های کاملاً بسته‌شده (شروع + ۴ ساعت <= الان)
-            now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-            rows = [r for r in rows if int(r[0]) + H4_MS <= now_ms]
-            rows.sort(key=lambda r: int(r[0]))  # قدیمی -> جدید
-
-            if len(rows) < 50:
-                logger.log_system_event(f"Too few closed 4H candles for {symbol}: {len(rows)}")
-                return None
-
-            times = [int(r[0]) for r in rows]
-            opens = [float(r[1]) for r in rows]
-            highs = [float(r[2]) for r in rows]
-            lows = [float(r[3]) for r in rows]
-            closes = [float(r[4]) for r in rows]
-            volumes = [float(r[5]) for r in rows]
-
-            ema_200, ema_used = self._calculate_ema(closes, EMA_PERIOD)
-            atr = self._calculate_atr(highs, lows, closes)
-
-            return {
-                'h4': {
-                    'times': times,
-                    'opens': opens,
-                    'highs': highs,
-                    'lows': lows,
-                    'closes': closes,
-                    'volumes': volumes,
-                    'close': closes[-1],
-                    'ema_200': ema_200,
-                    'ema_period_used': ema_used,
-                    'atr': atr,
-                    'count': len(rows),
-                }
-            }
+            price = await self._fetch_price(symbol)
+            h4 = dict(cached)
+            h4['price'] = price if price else cached['close']
+            h4['price_live'] = bool(price)
+            return {'h4': h4}
         except Exception as e:
             logger.log_system_event(f"Error fetching data for {symbol}: {e}")
             return None
