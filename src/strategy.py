@@ -1,179 +1,136 @@
 import asyncio
-from typing import Optional
-from datetime import datetime, timezone
+import time
+from pybit.unified_trading import HTTP
 from logger import get_trading_logger
 
 logger = get_trading_logger()
 
-class StrategyManager:
-    def __init__(self):
-        self.running = False
-        self.signals_today = 0
-        self.max_daily_signals = 2 
-        self.telegram_bot = None  
-        self.market_data = None   
-        self.last_crypto_signal_time = None 
-        self.watchlist = {} 
-        logger.log_system_event("Strategy Initialized (Golden V30.2 - Full Logging)")
+# ===================== تنظیمات =====================
+CANDLES_4H = 400          # تعداد کندل بسته‌شده ۴ ساعته (حدود ۶۷ روز)
+ATR_PERIOD = 14
+EMA_PERIOD = 200
+H4_MS = 4 * 60 * 60 * 1000
+CANDLE_GRACE_SEC = 15     # بعد از بسته شدن کندل جدید، چند ثانیه صبر کن تا بایبیت آپدیت کند
+RETRY_AFTER_FAIL_SEC = 90 # بعد از خطا چند ثانیه بعد دوباره تلاش کن
 
-    async def start_monitoring(self):
-        self.running = True
-        logger.log_system_event("Strategy Monitoring Started (24/7 Mode)...")
-        symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"] 
-        
-        while self.running:
-            for symbol in symbols:
-                try:
-                    if self.market_data:
-                        data = await self.market_data.get_market_data(symbol)
-                        if data:
-                            signal = await self.generate_signal(symbol, data)
-                            if signal:
-                                if self.telegram_bot:
-                                    await self.telegram_bot.send_signal(signal)
-                        else:
-                            logger.log_system_event(f"❌ [V30.2] {symbol} | Data is None (API issue).")
-                except Exception as e:
-                    logger.log_system_event(f"Error scanning {symbol}: {e}")
-                await asyncio.sleep(30) 
+
+class MarketDataHandler:
+    def __init__(self):
+        self.session = HTTP(testnet=False)
+        self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
+        self._cache = {}        # symbol -> دیتای کندل‌های ۴ساعته (فقط وقتی کندل جدید بسته شد آپدیت می‌شود)
+        self._next_fetch = {}   # symbol -> زمان (epoch ثانیه) مجاز برای دریافت دوباره کندل‌ها
+
+    async def start_data_collection(self):
+        while True:
             await asyncio.sleep(60)
 
-    async def stop(self):
-        self.running = False
-        logger.log_system_event("StrategyManager stopped")
+    @staticmethod
+    def _calculate_ema(prices, period):
+        """EMA واقعی. اگر دیتا کمتر از period باشد، با دیتای موجود محاسبه و period واقعی برگردانده می‌شود."""
+        if not prices:
+            return 0.0, 0
+        used = min(period, len(prices))
+        multiplier = 2 / (used + 1)
+        ema = sum(prices[:used]) / used
+        for price in prices[used:]:
+            ema = (price - ema) * multiplier + ema
+        return ema, used
 
-    def _find_levels(self, highs, lows, closes, current_price, is_uptrend):
-        if len(highs) < 5 or len(lows) < 5 or len(closes) < 5:
-            return None, None
+    @staticmethod
+    def _calculate_atr(highs, lows, closes, period=ATR_PERIOD):
+        if len(closes) < period + 1:
+            return 0.0
+        trs = [
+            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+            for i in range(1, len(closes))
+        ]
+        return sum(trs[-period:]) / period
 
-        levels = []
-        for i in range(2, len(highs) - 2):
-            if is_uptrend:
-                if highs[i] > highs[i-1] and highs[i] > highs[i-2] and highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                    levels.append(closes[i])
-            else:
-                if lows[i] < lows[i-1] and lows[i] < lows[i-2] and lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-                    levels.append(closes[i])
-        
-        if not levels: 
-            return None, None
-        
-        if is_uptrend:
-            valid_levels = sorted([l for l in levels if l > current_price])
-            if len(valid_levels) >= 2:
-                return valid_levels[0], valid_levels[1]
-            elif len(valid_levels) == 1:
-                return valid_levels[0], None
-        else:
-            valid_levels = sorted([l for l in levels if l < current_price], reverse=True)
-            if len(valid_levels) >= 2:
-                return valid_levels[0], valid_levels[1]
-            elif len(valid_levels) == 1:
-                return valid_levels[0], None
-                
-        return None, None
-
-    async def generate_signal(self, symbol: str, market_data: dict) -> Optional[dict]:
-        if self.signals_today >= self.max_daily_signals: 
+    async def _fetch_candles(self, symbol):
+        """کندل‌های ۴ساعته‌ی بسته‌شده را از بایبیت می‌گیرد. در صورت خطا None."""
+        # pybit همزمان (sync) است؛ در thread اجرا می‌شود تا event loop بلاک نشود
+        resp = await asyncio.to_thread(
+            self.session.get_kline,
+            category="linear",
+            symbol=symbol,
+            interval="240",
+            limit=CANDLES_4H + 1,
+        )
+        if resp.get('retCode', 0) != 0:
+            logger.log_system_event(f"Bybit error for {symbol}: {resp.get('retMsg')}")
             return None
 
-        h4 = market_data.get('h4', {})
-        h1 = market_data.get('h1', {})
-        m15 = market_data.get('m15', {})
-        
-        if not h4 or not h1 or not m15: 
+        rows = resp['result']['list']
+        if not rows:
+            logger.log_system_event(f"No 4H candles returned for {symbol}")
             return None
 
-        is_uptrend = h4.get('close', 0) > h4.get('ema_200', 0)
-        is_downtrend = h4.get('close', 0) < h4.get('ema_200', 0)
-        
-        now = datetime.now(timezone.utc)
-        m15_close = m15.get('close', 0)
-        m15_high = m15.get('high', 0)
-        m15_low = m15.get('low', 0)
-        m15_open = m15.get('open', 0)
-        m15_atr = m15.get('atr', 0.0010)
-        h1_close = h1.get('close', 0)
+        # فقط کندل‌های کاملاً بسته‌شده (شروع + ۴ ساعت <= الان)
+        now_ms = int(time.time() * 1000)
+        rows = [r for r in rows if int(r[0]) + H4_MS <= now_ms]
+        rows.sort(key=lambda r: int(r[0]))  # قدیمی -> جدید
 
-        logger.log_system_event(f"📡 [V30.2 RADAR] {symbol} | Price: {m15_close:.2f}")
-
-        lvl1, lvl2 = self._find_levels(h4.get('highs', []), h4.get('lows', []), h4.get('closes', []), m15_close, is_uptrend)
-
-        if not lvl1: 
-            logger.log_system_event(f"   ↳ No valid levels found for {symbol}.")
+        if len(rows) < 50:
+            logger.log_system_event(f"Too few closed 4H candles for {symbol}: {len(rows)}")
             return None
-        
-        if is_downtrend:
-            logger.log_system_event(f"   ↳ Nearest Sup (1): {lvl1:.2f} | Next Sup (2): {lvl2 if lvl2 else 'None'}")
-        else:
-            logger.log_system_event(f"   ↳ Nearest Res (1): {lvl1:.2f} | Next Res (2): {lvl2 if lvl2 else 'None'}")
 
-        signal_type = None
-        stop_loss = 0
-        take_profit = 0
+        closes = [float(r[4]) for r in rows]
+        highs = [float(r[2]) for r in rows]
+        lows = [float(r[3]) for r in rows]
+        ema_200, ema_used = self._calculate_ema(closes, EMA_PERIOD)
 
-        if symbol not in self.watchlist:
-            if is_downtrend:
-                if lvl2 and m15_high >= lvl2 and m15_close < lvl2 and m15_close < m15_open:
-                    signal_type = "SELL"
-                    stop_loss = m15_high + (m15_atr * 0.5)
-                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
-                
-                elif h1_close < lvl1:
-                    self.watchlist[symbol] = {'type': 'SELL_RETEST', 'level': lvl1, 'time': now}
-                    logger.log_system_event(f"📝 [V30.2] 1H Body Breakdown below {lvl1:.2f}. Level LOCKED. Waiting for Retest...")
-                    return None
+        return {
+            'times': [int(r[0]) for r in rows],
+            'opens': [float(r[1]) for r in rows],
+            'highs': highs,
+            'lows': lows,
+            'closes': closes,
+            'volumes': [float(r[5]) for r in rows],
+            'close': closes[-1],           # کلوز آخرین کندل بسته‌شده
+            'ema_200': ema_200,
+            'ema_period_used': ema_used,
+            'atr': self._calculate_atr(highs, lows, closes),
+            'count': len(rows),
+        }
 
-            elif is_uptrend:
-                if lvl2 and m15_low <= lvl2 and m15_close > lvl2 and m15_close > m15_open:
-                    signal_type = "BUY"
-                    stop_loss = m15_low - (m15_atr * 0.5)
-                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
-                
-                elif h1_close > lvl1:
-                    self.watchlist[symbol] = {'type': 'BUY_RETEST', 'level': lvl1, 'time': now}
-                    logger.log_system_event(f"📝 [V30.2] 1H Body Breakout above {lvl1:.2f}. Level LOCKED. Waiting for Retest...")
-                    return None
-        else:
-            watch = self.watchlist[symbol]
-            time_diff = (now - watch['time']).total_seconds() / 3600
-            if time_diff > 8:
-                del self.watchlist[symbol]
+    async def _fetch_price(self, symbol):
+        """قیمت زنده (lastPrice). در صورت خطا None."""
+        try:
+            resp = await asyncio.to_thread(
+                self.session.get_tickers, category="linear", symbol=symbol
+            )
+            if resp.get('retCode', 0) != 0:
+                return None
+            lst = resp['result']['list']
+            return float(lst[0]['lastPrice']) if lst else None
+        except Exception as e:
+            logger.log_system_event(f"Ticker error for {symbol}: {e}")
+            return None
+
+    async def get_market_data(self, symbol):
+        try:
+            now = time.time()
+
+            # کندل ۴ساعته فقط وقتی کندل جدید بسته شده (یا بعد از خطا) دوباره گرفته می‌شود
+            if now >= self._next_fetch.get(symbol, 0):
+                candles = await self._fetch_candles(symbol)
+                if candles:
+                    self._cache[symbol] = candles
+                    next_close = (candles['times'][-1] + 2 * H4_MS) / 1000
+                    self._next_fetch[symbol] = next_close + CANDLE_GRACE_SEC
+                else:
+                    self._next_fetch[symbol] = now + RETRY_AFTER_FAIL_SEC
+
+            cached = self._cache.get(symbol)
+            if not cached:
                 return None
 
-            if watch['type'] == 'SELL_RETEST' and is_downtrend:
-                if m15_high >= watch['level'] and m15_close < watch['level'] and m15_close < m15_open:
-                    signal_type = "SELL"
-                    stop_loss = m15_high + (m15_atr * 0.5)
-                    take_profit = m15_close - ((stop_loss - m15_close) * 2.0)
-                    del self.watchlist[symbol]
-
-            elif watch['type'] == 'BUY_RETEST' and is_uptrend:
-                if m15_low <= watch['level'] and m15_close > watch['level'] and m15_close > m15_open:
-                    signal_type = "BUY"
-                    stop_loss = m15_low - (m15_atr * 0.5)
-                    take_profit = m15_close + ((m15_close - stop_loss) * 2.0)
-                    del self.watchlist[symbol]
-
-        if signal_type:
-            if symbol != "XAUUSDT" and self.last_crypto_signal_time:
-                if (now - self.last_crypto_signal_time).total_seconds() / 3600 < 4: 
-                    return None 
-
-            if symbol != "XAUUSDT": 
-                self.last_crypto_signal_time = now
-                
-            self.signals_today += 1
-            
-            signal = {
-                'symbol': symbol, 'type': signal_type, 'entry_price': m15_close, 
-                'stop_loss': round(stop_loss, 4), 
-                'take_profit_1': round(take_profit, 4), 
-                'take_profit_2': 0, 
-                'take_profit_3': 0,
-                'strategy': 'Golden_V30.2'
-            }
-            logger.log_system_event(f"🏆 GOLDEN V30.2 ENTRY: {symbol} ({signal_type}) | Entry: {m15_close} | SL: {stop_loss} | TP: {take_profit}")
-            return signal
-        
-        return None
+            price = await self._fetch_price(symbol)
+            h4 = dict(cached)
+            h4['price'] = price if price else cached['close']
+            h4['price_live'] = bool(price)
+            return {'h4': h4}
+        except Exception as e:
+            logger.log_system_event(f"Error fetching data for {symbol}: {e}")
+            return None
