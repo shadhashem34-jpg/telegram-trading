@@ -1,10 +1,6 @@
 import asyncio
-import pandas as pd
 from datetime import datetime, timezone
 from logger import get_trading_logger
-
-from market_structure.hydrate import hydrate
-from market_structure.atr import _compute_atr
 
 logger = get_trading_logger()
 
@@ -13,19 +9,19 @@ class StrategyManager:
         self.running = False
         self.telegram_bot = telegram_bot
         self.market_data = None
-        self.active_setups = {}
+        self.active_setups = {} 
         
-        # تنظیمات
-        self.LOOKBACK_2H = 12   # ۱۲ کندل ۲ ساعته
-        self.LOOKBACK_4H = 18   # ۱۸ کندل ۴ ساعته (۳ روز)
-        self.ZONE_WIDTH_PCT = 0.00225 # 0.225% (حداکثر عرض)
+        # تنظیمات زون
+        self.ZONE_WIDTH_PCT = 0.00225 # 0.225% عرض زون
+        self.LOOKBACK_2H = 12         # ۱۲ کندل ۲ ساعته
+        self.LOOKBACK_4H = 18         # ۱۸ کندل ۴ ساعته (۳ روز)
 
     def set_market_data_handler(self, handler):
         self.market_data = handler
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V37 Started (market-structure: 2H & 4H Zones)")
+        logger.log_system_event("🚀 V38 (Lightweight) Started - 2H & 4H Zones")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -37,44 +33,7 @@ class StrategyManager:
                     logger.log_system_event(f"❌ Error in {symbol}: {e}")
                 await asyncio.sleep(15)
             
-            await asyncio.sleep(180)
-
-    def _df_from_data(self, data):
-        """تبدیل دیتای خام به DataFrame"""
-        return pd.DataFrame({
-            'open': data['opens'],
-            'high': data['highs'],
-            'low': data['lows'],
-            'close': data['closes'],
-            'volume': [1.0] * len(data['closes']) # حجم ساختگی (لازم نیست)
-        })
-
-    def _get_zones_from_df(self, df, atr):
-        """استخراج زونها از دیتافریم با market-structure"""
-        helper = hydrate(df)
-        zones = []
-        
-        # زونهای حمایت
-        for z in helper.get_support_zones(atr_arr=atr):
-            body_low, body_high = z.range
-            wick_low, wick_high = z.wick_range
-            zones.append({
-                'type': 'sup',
-                'body_low': body_low, 'body_high': body_high,
-                'wick_low': wick_low, 'wick_high': wick_high
-            })
-        
-        # زونهای مقاومت (با استفاده از get_resistance_zones)
-        for z in helper.get_resistance_zones(atr_arr=atr):
-            body_low, body_high = z.range
-            wick_low, wick_high = z.wick_range
-            zones.append({
-                'type': 'res',
-                'body_low': body_low, 'body_high': body_high,
-                'wick_low': wick_low, 'wick_high': wick_high
-            })
-        
-        return zones
+            await asyncio.sleep(180) 
 
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
@@ -86,27 +45,36 @@ class StrategyManager:
 
         price = h2['price']
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
+        
+        zone_width = price * self.ZONE_WIDTH_PCT
+        half_w = zone_width / 2
 
-        # دیتای ۲ ساعته (۱۲ کندل آخر)
-        df_2h = self._df_from_data(h2).iloc[-self.LOOKBACK_2H:]
-        atr_2h = _compute_atr(df_2h['high'].values, df_2h['low'].values, df_2h['close'].values, period=14)
-        zones_2h = self._get_zones_from_df(df_2h, atr_2h)
+        # --- محاسبه سطوح 2H (12 کندل) ---
+        h2_high = max(h2['highs'][-self.LOOKBACK_2H:])
+        h2_low = min(h2['lows'][-self.LOOKBACK_2H:])
+        
+        res_2h = {'low': h2_high - half_w, 'high': h2_high + half_w, 'type': 'res'}
+        sup_2h = {'low': h2_low - half_w, 'high': h2_low + half_w, 'type': 'sup'}
 
-        # دیتای ۴ ساعته (۱۸ کندل آخر = ۳ روز)
-        df_4h = self._df_from_data(h4).iloc[-self.LOOKBACK_4H:]
-        atr_4h = _compute_atr(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, period=14)
-        zones_4h = self._get_zones_from_df(df_4h, atr_4h)
+        # --- محاسبه سطوح 4H (18 کندل) ---
+        h4_high = max(h4['highs'][-self.LOOKBACK_4H:])
+        h4_low = min(h4['lows'][-self.LOOKBACK_4H:])
+        
+        res_4h = {'low': h4_high - half_w, 'high': h4_high + half_w, 'type': 'res'}
+        sup_4h = {'low': h4_low - half_w, 'high': h4_low + half_w, 'type': 'sup'}
 
-        # ترکیب همه زونها
-        all_zones = zones_2h + zones_4h
+        # ترکیب زون‌ها
+        all_zones = [res_2h, sup_2h, res_4h, sup_4h]
 
-        # لاگگیری
+        # لاگ‌گیری شفاف
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
-        for z in all_zones[:4]: # فقط ۴ زون اول را نشان بده
-            log_msg += f"   ↳ {z['type'].upper()}: body({z['body_low']:.2f}-{z['body_high']:.2f}) wick({z['wick_low']:.2f}-{z['wick_high']:.2f})\n"
+        log_msg += f"   ↳ 2H Res Zone: {res_2h['low']:.2f} - {res_2h['high']:.2f}\n"
+        log_msg += f"   ↳ 2H Sup Zone: {sup_2h['low']:.2f} - {sup_2h['high']:.2f}\n"
+        log_msg += f"   ↳ 4H Res Zone: {res_4h['low']:.2f} - {res_4h['high']:.2f}\n"
+        log_msg += f"   ↳ 4H Sup Zone: {sup_4h['low']:.2f} - {sup_4h['high']:.2f}\n"
         logger.log_system_event(log_msg)
 
-        # ماشین وضعیت (بررسی برخورد قیمت با زونها)
+        # --- ماشین وضعیت (State Machine) ---
         if symbol not in self.active_setups:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None}
 
@@ -114,10 +82,10 @@ class StrategyManager:
 
         if state['state'] == 'IDLE':
             for z in all_zones:
-                # بررسی برخورد قیمت با زون (بر اساس body)
-                if z['body_low'] <= price <= z['body_high']:
+                # بررسی برخورد قیمت با هر زون
+                if z['low'] <= price <= z['high']:
                     state.update({'state': 'IN_ZONE', 'zone': z})
-                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} zone. Waiting for 15M Rejection...")
+                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} Zone ({z['low']:.2f}-{z['high']:.2f}). Waiting for 15M Rejection...")
                     break
 
         elif state['state'] == 'IN_ZONE':
@@ -128,57 +96,61 @@ class StrategyManager:
             m15_open = m15['opens'][-1]
 
             if z['type'] == 'res':
-                # سایه وارد زون شده اما بدنه زیر body_low بسته شده
-                if m15_high >= z['body_low'] and m15_close < z['body_low'] and m15_close < m15_open:
-                    logger.log_system_event(f"🏆 [{symbol}] SHORT Entry (Rejection at Res Zone)!")
-                    self.send_signal(symbol, 'SHORT', m15_close, z, atr_2h)
+                # سایه وارد زون شده اما بدنه زیر زون بسته شده (Rejection)
+                if m15_high >= z['low'] and m15_close < z['low'] and m15_close < m15_open:
+                    logger.log_system_event(f"🏆 [{symbol}] SHORT Entry (Rejection at Res)!")
+                    self.send_signal(symbol, 'SHORT', m15_close, z, h2['atr'])
                     state.update({'state': 'IDLE', 'zone': None})
+                
+                # شکست به بالا (Breakout)
+                elif m15_close > z['high']:
+                    state.update({'state': 'WAIT_PB_SHORT', 'zone': z})
+                    logger.log_system_event(f"📝 [{symbol}] Resistance broken. Waiting for pullback...")
+            
             elif z['type'] == 'sup':
-                # سایه وارد زون شده اما بدنه بالای body_high بسته شده
-                if m15_low <= z['body_high'] and m15_close > z['body_high'] and m15_close > m15_open:
-                    logger.log_system_event(f"🏆 [{symbol}] LONG Entry (Rejection at Sup Zone)!")
-                    self.send_signal(symbol, 'LONG', m15_close, z, atr_2h)
+                # سایه وارد زون شده اما بدنه بالای زون بسته شده (Rejection)
+                if m15_low <= z['high'] and m15_close > z['high'] and m15_close > m15_open:
+                    logger.log_system_event(f"🏆 [{symbol}] LONG Entry (Rejection at Sup)!")
+                    self.send_signal(symbol, 'LONG', m15_close, z, h2['atr'])
                     state.update({'state': 'IDLE', 'zone': None})
+                
+                # شکست به پایین (Breakout)
+                elif m15_close < z['low']:
+                    state.update({'state': 'WAIT_PB_LONG', 'zone': z})
+                    logger.log_system_event(f"📝 [{symbol}] Support broken. Waiting for pullback...")
 
-            # اگر قیمت بدون ریجکشن از زون رد شد (شکست) -> به حالت انتظار پولبک برو
-            if m15_close > z['body_high'] and z['type'] == 'res':
-                state.update({'state': 'WAIT_PB_SHORT', 'zone': z})
-                logger.log_system_event(f"📝 [{symbol}] Resistance broken. Waiting for pullback...")
-            elif m15_close < z['body_low'] and z['type'] == 'sup':
-                state.update({'state': 'WAIT_PB_LONG', 'zone': z})
-                logger.log_system_event(f"📝 [{symbol}] Support broken. Waiting for pullback...")
-
-        elif state['state'] == 'WAIT_PB_SHORT':
+        elif state['state'] in ['WAIT_PB_SHORT', 'WAIT_PB_LONG']:
             z = state['zone']
             m15_close = m15['closes'][-1]
             m15_high = m15['highs'][-1]
-            m15_open = m15['opens'][-1]
-            if m15_high >= z['body_low'] and m15_close < z['body_low'] and m15_close < m15_open:
-                logger.log_system_event(f"🏆 [{symbol}] SHORT Entry (Pullback after Breakout)!")
-                self.send_signal(symbol, 'SHORT', m15_close, z, atr_2h)
-                state.update({'state': 'IDLE', 'zone': None})
-
-        elif state['state'] == 'WAIT_PB_LONG':
-            z = state['zone']
-            m15_close = m15['closes'][-1]
             m15_low = m15['lows'][-1]
             m15_open = m15['opens'][-1]
-            if m15_low <= z['body_high'] and m15_close > z['body_high'] and m15_close > m15_open:
-                logger.log_system_event(f"🏆 [{symbol}] LONG Entry (Pullback after Breakout)!")
-                self.send_signal(symbol, 'LONG', m15_close, z, atr_2h)
-                state.update({'state': 'IDLE', 'zone': None})
+
+            if state['state'] == 'WAIT_PB_SHORT':
+                # پولبک به مقاومت شکسته شده و برگشت
+                if m15_high >= z['low'] and m15_close < z['low'] and m15_close < m15_open:
+                    logger.log_system_event(f"🏆 [{symbol}] SHORT Entry (Pullback after Breakout)!")
+                    self.send_signal(symbol, 'SHORT', m15_close, z, h2['atr'])
+                    state.update({'state': 'IDLE', 'zone': None})
+
+            elif state['state'] == 'WAIT_PB_LONG':
+                # پولبک به حمایت شکسته شده و برگشت
+                if m15_low <= z['high'] and m15_close > z['high'] and m15_close > m15_open:
+                    logger.log_system_event(f"🏆 [{symbol}] LONG Entry (Pullback after Breakout)!")
+                    self.send_signal(symbol, 'LONG', m15_close, z, h2['atr'])
+                    state.update({'state': 'IDLE', 'zone': None})
 
     def send_signal(self, symbol, direction, entry, zone, atr):
         if not self.telegram_bot: return
-        sl = zone['wick_high'] if direction == 'SHORT' else zone['wick_low']
+        sl = zone['high'] if direction == 'SHORT' else zone['low']
         risk = abs(entry - sl)
-        if risk < atr * 0.2: risk = atr * 1.0
+        if risk < atr * 0.2: risk = atr * 1.0 
         
         tp = entry - (risk * 1.5) if direction == 'SHORT' else entry + (risk * 1.5)
         
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V37_MarketStructure'
+            'strategy': 'V38_Lightweight'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
