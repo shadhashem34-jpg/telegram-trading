@@ -13,7 +13,7 @@ class StrategyManager:
         self._last_signal_time = {}
         
         # تنظیمات
-        self.MIN_REACTIONS = 2
+        self.MIN_REACTIONS = 1 # 🟢 تغییر یافت به ۱
         self.ZONE_WIDTH_PCT = 0.00225 # 0.225%
         self.SWING_N = 3
 
@@ -137,7 +137,7 @@ class StrategyManager:
                     logger.log_system_event(f"⚠️ [{symbol}] Failed Breakout! Price returned inside zone. Setup Cancelled.")
                     state.update({'state': 'IDLE', 'zone': None, 'direction': None})
 
-    def find_zones(self, data, lookback, atr, price): # 🟢 اصلاح نام پارامتر به price
+    def find_zones(self, data, lookback, atr, price):
         """تشخیص زون‌ها با عرض حداکثر 0.225%"""
         highs, lows, closes = data['highs'][-lookback:], data['lows'][-lookback:], data['closes'][-lookback:]
         swings = []
@@ -169,7 +169,7 @@ class StrategyManager:
         valid_zones = []
         for c in clusters:
             prices = [s['price'] for s in c]
-            if len(prices) >= self.MIN_REACTIONS: # حداقل ۲ واکنش
+            if len(prices) >= self.MIN_REACTIONS: # 🟢 حالا با ۱ واکنش هم قبول می‌شود
                 z_low, z_high = min(prices), max(prices)
                 
                 # اعمال سقف عرض زون
