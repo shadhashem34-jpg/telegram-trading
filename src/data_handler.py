@@ -19,6 +19,11 @@ class MarketDataHandler:
         self._cache = {}
         self._next_fetch = {}
 
+    async def start_data_collection(self):
+        """متد اضافه شده برای هماهنگی با bot.py"""
+        while True:
+            await asyncio.sleep(60)
+
     @staticmethod
     def _calculate_ema(prices, period):
         if not prices: return 0.0, 0
