@@ -12,16 +12,15 @@ class StrategyManager:
         self.active_setups = {} 
         
         # تنظیمات
-        self.LOOKBACK_2H = 24   
-        self.LOOKBACK_4H = 24   
-        self.MAX_ZONE_WIDTH_PCT = 0.00225 # حداکثر عرض زون 0.225%
+        self.LOOKBACK_4H = 24   # بررسی ۲۴ کندل ۴ ساعته
+        self.MAX_ZONE_WIDTH_PCT = 0.0025 # عرض زون 0.25%
 
     def set_market_data_handler(self, handler):
         self.market_data = handler
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V41 Started (Swing Zones with 0.225% Max Width)")
+        logger.log_system_event("🚀 V43 Started (4H Zones -> 1H Confirm -> 15M Retest)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -36,7 +35,6 @@ class StrategyManager:
             await asyncio.sleep(180) 
 
     def find_nearest_zones(self, data, lookback, current_price):
-        """پیدا کردن نزدیک‌ترین سقف و کف و ساخت زون (از بدنه به سمت سایه با سقف 0.225%)"""
         highs = data['highs'][-lookback:]
         lows = data['lows'][-lookback:]
         closes = data['closes'][-lookback:]
@@ -44,17 +42,16 @@ class StrategyManager:
         swing_highs = []
         swing_lows = []
 
-        # حداکثر عرض مجاز زون (۰.۲۲۵ درصد قیمت فعلی)
+        # حداکثر عرض مجاز زون (۰.۲۵ درصد قیمت)
         max_width = current_price * self.MAX_ZONE_WIDTH_PCT
 
         for i in range(2, len(highs) - 2):
             # مقاومت (سقف)
             if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
                highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                base = closes[i] # بدنه
-                wick = highs[i]  # سایه
+                base = closes[i] 
+                wick = highs[i]  
                 
-                # اگر فاصله بدنه تا سایه بیشتر از سقف مجاز بود
                 if abs(wick - base) > max_width:
                     zone_low = base
                     zone_high = base + max_width
@@ -62,17 +59,14 @@ class StrategyManager:
                     zone_low = base
                     zone_high = wick
                 
-                # اطمینان از مرتب بودن
-                if zone_low > zone_high:
-                    zone_low, zone_high = zone_high, zone_low
-                
+                if zone_low > zone_high: zone_low, zone_high = zone_high, zone_low
                 swing_highs.append({'low': zone_low, 'high': zone_high, 'type': 'res'})
             
             # حمایت (کف)
             if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
                lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-                base = closes[i] # بدنه
-                wick = lows[i]   # سایه
+                base = closes[i] 
+                wick = lows[i]   
                 
                 if abs(wick - base) > max_width:
                     zone_high = base
@@ -81,107 +75,88 @@ class StrategyManager:
                     zone_high = base
                     zone_low = wick
                 
-                if zone_low > zone_high:
-                    zone_low, zone_high = zone_high, zone_low
-                    
+                if zone_low > zone_high: zone_low, zone_high = zone_high, zone_low
                 swing_lows.append({'low': zone_low, 'high': zone_high, 'type': 'sup'})
 
-        # پیدا کردن نزدیک‌ترین سقف بالای قیمت
         nearest_res = None
         valid_highs = [z for z in swing_highs if z['low'] > current_price] 
-        if valid_highs:
-            nearest_res = min(valid_highs, key=lambda z: z['low'])
+        if valid_highs: nearest_res = min(valid_highs, key=lambda z: z['low'])
 
-        # پیدا کردن نزدیک‌ترین کف زیر قیمت
         nearest_sup = None
         valid_lows = [z for z in swing_lows if z['high'] < current_price] 
-        if valid_lows:
-            nearest_sup = max(valid_lows, key=lambda z: z['high'])
+        if valid_lows: nearest_sup = max(valid_lows, key=lambda z: z['high'])
 
         return nearest_res, nearest_sup
 
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
-        h2 = await self.market_data.get_tf_data(symbol, "120")
         h1 = await self.market_data.get_tf_data(symbol, "60")
         m15 = await self.market_data.get_tf_data(symbol, "15")
 
-        if not all([h4, h2, h1, m15]): return
+        if not all([h4, h1, m15]): return
 
-        price = h2['price']
+        price = h4['price'] 
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
         
-        res_2h, sup_2h = self.find_nearest_zones(h2, self.LOOKBACK_2H, price)
         res_4h, sup_4h = self.find_nearest_zones(h4, self.LOOKBACK_4H, price)
 
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
-        
-        log_msg += "⚙️ 2H Levels:\n"
-        log_msg += f"   ↳ Nearest Res: {res_2h['low']:.2f} - {res_2h['high']:.2f}\n" if res_2h else "   ↳ Nearest Res: None\n"
-        log_msg += f"   ↳ Nearest Sup: {sup_2h['low']:.2f} - {sup_2h['high']:.2f}\n" if sup_2h else "   ↳ Nearest Sup: None\n"
-
         log_msg += "⚙️ 4H Levels:\n"
         log_msg += f"   ↳ Nearest Res: {res_4h['low']:.2f} - {res_4h['high']:.2f}\n" if res_4h else "   ↳ Nearest Res: None\n"
         log_msg += f"   ↳ Nearest Sup: {sup_4h['low']:.2f} - {sup_4h['high']:.2f}\n" if sup_4h else "   ↳ Nearest Sup: None\n"
-        
         logger.log_system_event(log_msg)
 
-        # ماشین وضعیت
+        # --- ماشین وضعیت (State Machine) ---
         if symbol not in self.active_setups:
-            self.active_setups[symbol] = {'state': 'IDLE', 'zone': None}
+            self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
 
         state = self.active_setups[symbol]
-        
-        all_zones = []
-        if res_2h: all_zones.append(res_2h)
-        if sup_2h: all_zones.append(sup_2h)
-        if res_4h: all_zones.append(res_4h)
-        if sup_4h: all_zones.append(sup_4h)
+        all_zones = [z for z in [res_4h, sup_4h] if z is not None]
 
         if state['state'] == 'IDLE':
             for z in all_zones:
+                # قیمت وارد زون ۴ ساعته شده
                 if z['low'] <= price <= z['high']:
-                    state.update({'state': 'IN_ZONE', 'zone': z})
-                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} Zone ({z['low']:.2f}-{z['high']:.2f}). Waiting for 15M Rejection...")
+                    direction = 'SHORT' if z['type'] == 'res' else 'LONG'
+                    state.update({'state': 'WAIT_1H_BREAK', 'zone': z, 'direction': direction})
+                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} Zone ({z['low']:.2f}-{z['high']:.2f}). Waiting for 1H Body Break...")
                     break
 
-        elif state['state'] == 'IN_ZONE':
+        elif state['state'] == 'WAIT_1H_BREAK':
             z = state['zone']
-            m15_close = m15['closes'][-1]
-            m15_high = m15['highs'][-1]
-            m15_low = m15['lows'][-1]
-            m15_open = m15['opens'][-1]
-
-            if z['type'] == 'res':
-                if m15_high >= z['low'] and m15_close < z['low'] and m15_close < m15_open:
-                    logger.log_system_event(f"🏆 [{symbol}] SHORT Entry (Rejection at Res)!")
-                    self.send_signal(symbol, 'SHORT', m15_close, z, h2['atr'])
-                    state.update({'state': 'IDLE', 'zone': None})
-                elif m15_close > z['high']:
-                    state.update({'state': 'WAIT_PB_SHORT', 'zone': z})
+            h1_close = h1['closes'][-1]
             
-            elif z['type'] == 'sup':
-                if m15_low <= z['high'] and m15_close > z['high'] and m15_close > m15_open:
-                    logger.log_system_event(f"🏆 [{symbol}] LONG Entry (Rejection at Sup)!")
-                    self.send_signal(symbol, 'LONG', m15_close, z, h2['atr'])
+            if state['direction'] == 'SHORT':
+                if h1_close < z['low']:
+                    state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
+                    logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below Res. Waiting for 15M Pullback...")
+                elif h1_close > z['high'] + (h4['atr'] * 0.5): # اگر برگشت بالا
                     state.update({'state': 'IDLE', 'zone': None})
-                elif m15_close < z['low']:
-                    state.update({'state': 'WAIT_PB_LONG', 'zone': z})
+            elif state['direction'] == 'LONG':
+                if h1_close > z['high']:
+                    state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
+                    logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED above Sup. Waiting for 15M Pullback...")
+                elif h1_close < z['low'] - (h4['atr'] * 0.5):
+                    state.update({'state': 'IDLE', 'zone': None})
 
-        elif state['state'] in ['WAIT_PB_SHORT', 'WAIT_PB_LONG']:
+        elif state['state'] == 'WAIT_15M_RETEST':
             z = state['zone']
             m15_close = m15['closes'][-1]
             m15_high = m15['highs'][-1]
             m15_low = m15['lows'][-1]
             m15_open = m15['opens'][-1]
 
-            if state['state'] == 'WAIT_PB_SHORT':
+            if state['direction'] == 'SHORT':
+                # سایه وارد زون شده اما بدنه زیر زون بسته شده
                 if m15_high >= z['low'] and m15_close < z['low'] and m15_close < m15_open:
-                    self.send_signal(symbol, 'SHORT', m15_close, z, h2['atr'])
+                    logger.log_system_event(f"🏆 [{symbol}] SHORT Entry Triggered!")
+                    self.send_signal(symbol, 'SHORT', m15_close, z, h4['atr'])
                     state.update({'state': 'IDLE', 'zone': None})
-            elif state['state'] == 'WAIT_PB_LONG':
+            elif state['direction'] == 'LONG':
+                # سایه وارد زون شده اما بدنه بالای زون بسته شده
                 if m15_low <= z['high'] and m15_close > z['high'] and m15_close > m15_open:
-                    self.send_signal(symbol, 'LONG', m15_close, z, h2['atr'])
+                    logger.log_system_event(f"🏆 [{symbol}] LONG Entry Triggered!")
+                    self.send_signal(symbol, 'LONG', m15_close, z, h4['atr'])
                     state.update({'state': 'IDLE', 'zone': None})
 
     def send_signal(self, symbol, direction, entry, zone, atr):
@@ -195,6 +170,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V41_SwingZones'
+            'strategy': 'V43_4H_Structure'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
