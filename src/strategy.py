@@ -64,6 +64,15 @@ class StrategyManager:
         atr = h4['atr']
         trend = "UP" if price > h4['ema_200'] else "DOWN"
 
+        # 🟢 لاگ جدید: نمایش قیمت و نزدیک‌ترین زون‌های معتبر
+        if valid_zones:
+            # مرتب‌سازی زون‌ها بر اساس فاصله از قیمت فعلی
+            sorted_zones = sorted(valid_zones, key=lambda z: abs(price - (z['high'] + z['low']) / 2))
+            nearest_zones_str = " | ".join([f"[{_fmt(z['low'])} - {_fmt(z['high'])}]" for z in sorted_zones[:3]])
+            logger.log_system_event(f"📡 [ZONE RADAR] {symbol} | Price: {_fmt(price)} | Trend: {trend} | Nearest Zones: {nearest_zones_str}")
+        else:
+            logger.log_system_event(f"📡 [ZONE RADAR] {symbol} | Price: {_fmt(price)} | Trend: {trend} | No valid zones found.")
+
         # ۲. بررسی زون‌های نزدیک به قیمت
         for zone in valid_zones:
             dist = abs(price - (zone['high'] + zone['low']) / 2)
