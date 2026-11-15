@@ -9,6 +9,7 @@ CANDLES_4H = 400
 ATR_PERIOD = 14
 EMA_PERIOD = 200
 H4_MS = 4 * 60 * 60 * 1000
+H2_MS = 2 * 60 * 60 * 1000
 CANDLE_GRACE_SEC = 15
 RETRY_AFTER_FAIL_SEC = 90
 
@@ -17,10 +18,11 @@ class MarketDataHandler:
         self.session = HTTP(testnet=False)
         self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         self._cache = {}
+        self._cache_2h = {}
         self._next_fetch = {}
+        self._next_fetch_2h = {}
 
     async def start_data_collection(self):
-        """متد اضافه شده برای هماهنگی با bot.py"""
         while True:
             await asyncio.sleep(60)
 
@@ -41,7 +43,6 @@ class MarketDataHandler:
         return sum(trs[-period:]) / period
 
     async def _fetch_candles(self, symbol, interval="240", limit=400):
-        """دیتای کندل‌ها را می‌گیرد. interval می‌تواند 240، 60 یا 15 باشد."""
         resp = await asyncio.to_thread(
             self.session.get_kline, category="linear", symbol=symbol, interval=interval, limit=limit
         )
@@ -52,7 +53,6 @@ class MarketDataHandler:
         rows = resp['result']['list']
         if not rows: return None
 
-        # فقط کندل‌های بسته شده
         now_ms = int(time.time() * 1000)
         interval_ms = int(interval) * 60 * 1000
         rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]
@@ -61,13 +61,14 @@ class MarketDataHandler:
         closes = [float(r[4]) for r in rows]
         highs = [float(r[2]) for r in rows]
         lows = [float(r[3]) for r in rows]
+        opens = [float(r[1]) for r in rows]
         
         ema_200, ema_used = (self._calculate_ema(closes, EMA_PERIOD) if interval == "240" else (0, 0))
-        atr = self._calculate_atr(highs, lows, closes) if interval == "240" else 0.0
+        atr = self._calculate_atr(highs, lows, closes) if interval in ("240", "120") else 0.0
 
         return {
             'times': [int(r[0]) for r in rows],
-            'opens': [float(r[1]) for r in rows],
+            'opens': opens,
             'highs': highs, 'lows': lows, 'closes': closes,
             'close': closes[-1],
             'ema_200': ema_200, 'ema_period_used': ema_used,
@@ -80,11 +81,10 @@ class MarketDataHandler:
             if resp.get('retCode', 0) != 0: return None
             lst = resp['result']['list']
             return float(lst[0]['lastPrice']) if lst else None
-        except Exception as e:
+        except Exception:
             return None
 
     async def get_4h_data(self, symbol):
-        """دیتای ۴ ساعته (با کش و زمان‌بندی)"""
         try:
             now = time.time()
             if now >= self._next_fetch.get(symbol, 0):
@@ -108,8 +108,32 @@ class MarketDataHandler:
             logger.log_system_event(f"Error fetching 4H data for {symbol}: {e}")
             return None
 
+    async def get_2h_data(self, symbol):
+        """دیتای ۲ ساعته برای پیدا کردن اوردر بلاک‌ها"""
+        try:
+            now = time.time()
+            if now >= self._next_fetch_2h.get(symbol, 0):
+                candles = await self._fetch_candles(symbol, "120", 200)
+                if candles:
+                    self._cache_2h[symbol] = candles
+                    next_close = (candles['times'][-1] + H2_MS) / 1000
+                    self._next_fetch_2h[symbol] = next_close + CANDLE_GRACE_SEC
+                else:
+                    self._next_fetch_2h[symbol] = now + RETRY_AFTER_FAIL_SEC
+
+            cached = self._cache_2h.get(symbol)
+            if not cached: return None
+
+            price = await self._fetch_price(symbol)
+            h2 = dict(cached)
+            h2['price'] = price if price else cached['close']
+            h2['price_live'] = bool(price)
+            return {'h2': h2}
+        except Exception as e:
+            logger.log_system_event(f"Error fetching 2H data for {symbol}: {e}")
+            return None
+
     async def get_lower_tf_data(self, symbol, interval="60", limit=50):
-        """دیتای تایم‌فریم پایین‌تر (۱ ساعته یا ۱۵ دقیقه) - فقط در زمان نیاز فراخوانی شود"""
         try:
             return await self._fetch_candles(symbol, interval, limit)
         except Exception as e:
