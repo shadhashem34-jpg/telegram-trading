@@ -12,15 +12,16 @@ class StrategyManager:
         self.active_setups = {} 
         
         # تنظیمات
-        self.LOOKBACK_2H = 24   # برای پیدا کردن پیوت‌های ۲ ساعته
-        self.LOOKBACK_4H = 24   # برای پیدا کردن پیوت‌های ۴ ساعته
+        self.LOOKBACK_2H = 24   
+        self.LOOKBACK_4H = 24   
+        self.MAX_ZONE_WIDTH_PCT = 0.00225 # حداکثر عرض زون 0.225%
 
     def set_market_data_handler(self, handler):
         self.market_data = handler
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V40 Started (Simple Nearest Swing Zones)")
+        logger.log_system_event("🚀 V41 Started (Swing Zones with 0.225% Max Width)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -35,7 +36,7 @@ class StrategyManager:
             await asyncio.sleep(180) 
 
     def find_nearest_zones(self, data, lookback, current_price):
-        """پیدا کردن نزدیک‌ترین سقف و کف (Swing) بالای/زیر قیمت و ساخت زون"""
+        """پیدا کردن نزدیک‌ترین سقف و کف و ساخت زون (از بدنه به سمت سایه با سقف 0.225%)"""
         highs = data['highs'][-lookback:]
         lows = data['lows'][-lookback:]
         closes = data['closes'][-lookback:]
@@ -43,29 +44,57 @@ class StrategyManager:
         swing_highs = []
         swing_lows = []
 
-        # پیدا کردن سقف و کف‌های معتبر (۲ کندل چپ و ۲ کندل راست)
+        # حداکثر عرض مجاز زون (۰.۲۲۵ درصد قیمت فعلی)
+        max_width = current_price * self.MAX_ZONE_WIDTH_PCT
+
         for i in range(2, len(highs) - 2):
-            # سقف
+            # مقاومت (سقف)
             if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
                highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                # زون مقاومت: از بدنه (Close) تا سایه (High)
-                swing_highs.append({'low': closes[i], 'high': highs[i], 'type': 'res'})
+                base = closes[i] # بدنه
+                wick = highs[i]  # سایه
+                
+                # اگر فاصله بدنه تا سایه بیشتر از سقف مجاز بود
+                if abs(wick - base) > max_width:
+                    zone_low = base
+                    zone_high = base + max_width
+                else:
+                    zone_low = base
+                    zone_high = wick
+                
+                # اطمینان از مرتب بودن
+                if zone_low > zone_high:
+                    zone_low, zone_high = zone_high, zone_low
+                
+                swing_highs.append({'low': zone_low, 'high': zone_high, 'type': 'res'})
             
-            # کف
+            # حمایت (کف)
             if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
                lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-                # زون حمایت: از سایه (Low) تا بدنه (Close)
-                swing_lows.append({'low': lows[i], 'high': closes[i], 'type': 'sup'})
+                base = closes[i] # بدنه
+                wick = lows[i]   # سایه
+                
+                if abs(wick - base) > max_width:
+                    zone_high = base
+                    zone_low = base - max_width
+                else:
+                    zone_high = base
+                    zone_low = wick
+                
+                if zone_low > zone_high:
+                    zone_low, zone_high = zone_high, zone_low
+                    
+                swing_lows.append({'low': zone_low, 'high': zone_high, 'type': 'sup'})
 
         # پیدا کردن نزدیک‌ترین سقف بالای قیمت
         nearest_res = None
-        valid_highs = [z for z in swing_highs if z['low'] > current_price] # کف زون بالای قیمت باشه
+        valid_highs = [z for z in swing_highs if z['low'] > current_price] 
         if valid_highs:
             nearest_res = min(valid_highs, key=lambda z: z['low'])
 
         # پیدا کردن نزدیک‌ترین کف زیر قیمت
         nearest_sup = None
-        valid_lows = [z for z in swing_lows if z['high'] < current_price] # سقف زون زیر قیمت باشه
+        valid_lows = [z for z in swing_lows if z['high'] < current_price] 
         if valid_lows:
             nearest_sup = max(valid_lows, key=lambda z: z['high'])
 
@@ -82,11 +111,9 @@ class StrategyManager:
         price = h2['price']
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
         
-        # پیدا کردن سطوح ۲ ساعته و ۴ ساعته
         res_2h, sup_2h = self.find_nearest_zones(h2, self.LOOKBACK_2H, price)
         res_4h, sup_4h = self.find_nearest_zones(h4, self.LOOKBACK_4H, price)
 
-        # لاگ‌گیری دقیقاً مثل اعداد نقطه‌چین تو
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
         
         log_msg += "⚙️ 2H Levels:\n"
@@ -99,13 +126,12 @@ class StrategyManager:
         
         logger.log_system_event(log_msg)
 
-        # --- ماشین وضعیت (State Machine) ---
+        # ماشین وضعیت
         if symbol not in self.active_setups:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None}
 
         state = self.active_setups[symbol]
         
-        # بررسی زون‌های ۲ ساعته (چون برای ترید روزانه نزدیک‌ترن)
         all_zones = []
         if res_2h: all_zones.append(res_2h)
         if sup_2h: all_zones.append(sup_2h)
@@ -169,6 +195,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V40_SwingZones'
+            'strategy': 'V41_SwingZones'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
