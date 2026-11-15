@@ -7,8 +7,8 @@ logger = get_trading_logger()
 
 # ===================== تنظیمات استراتژی =====================
 SCAN_SYMBOLS = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
-OB_LOOKBACK = 5          # تعداد کندل‌های مورد بررسی برای تشخیص اوردر بلاک
-ZONE_PROXIMITY_ATR = 1.5 # قیمت باید حداکثر ۱.۵ ATR با زون فاصله داشته باشد
+ZONE_PROXIMITY_ATR = 1.5
+MAX_ZONE_WIDTH_PCT = 0.005  # حداکثر عرض مجاز زون 0.5 درصد قیمت
 
 def _fmt(p: float) -> str:
     if p >= 100: return f"{p:.2f}"
@@ -31,7 +31,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 MTF Strategy Started (2H Order Blocks -> 1H/15m Triggers)")
+        logger.log_system_event("🚀 MTF Strategy Started (2H OBs & 10-Candle Levels -> 1H/15m Triggers)")
 
         while self.running:
             for symbol in SCAN_SYMBOLS:
@@ -49,72 +49,80 @@ class StrategyManager:
         h2 = data['h2']
         if h2['count'] < 20: return
 
-        # 🟢 استفاده از اوردر بلاک‌های تایم ۲ ساعته برای پیدا کردن سطوح
-        order_blocks = self.find_order_blocks(h2)
-        valid_zones = [z for z in order_blocks if z['valid']]
-        self.zones[symbol] = valid_zones
-
         price = _price(h2)
         atr = h2['atr']
+        
+        # 🟢 تشخیص روند اصلاح شده
         trend = "UP" if price > h2['ema_200'] else "DOWN"
 
-        # لاگ RADAR (فقط سطح، بدون تغییر در ساختار)
-        if valid_zones:
-            sorted_zones = sorted(valid_zones, key=lambda z: abs(price - (z['high'] + z['low']) / 2))
-            nearest_zones_str = " | ".join([f"[{_fmt(z['low'])} - {_fmt(z['high'])}]" for z in sorted_zones[:3]])
-            logger.log_system_event(f"📡 [OB RADAR] {symbol} | Price: {_fmt(price)} | Trend: {trend} | Nearest OBs: {nearest_zones_str}")
-        else:
-            logger.log_system_event(f"📡 [OB RADAR] {symbol} | Price: {_fmt(price)} | Trend: {trend} | No valid OBs found.")
+        # ۱. پیدا کردن سطوح (اوردر بلاک‌های تاریخی + سطوح داینامیک ۱۰ کندل اخیر)
+        obs = self.find_order_blocks(h2)
+        
+        # محاسبه بالاترین و پایین‌ترین سقف/کف ۱۰ کندل اخیر (سطوح داینامیک)
+        recent_highs = h2['highs'][-10:]
+        recent_lows = h2['lows'][-10:]
+        dyn_high = max(recent_highs) if recent_highs else price
+        dyn_low = min(recent_lows) if recent_lows else price
 
-        # بررسی نزدیکی قیمت به زون‌ها (این بخش بدون تغییر است)
+        # ترکیب همه سطوح
+        all_zones = obs + [
+            {'low': dyn_low, 'high': dyn_low + (atr*0.1), 'valid': True, 'type': 'dynamic_low'},
+            {'low': dyn_high - (atr*0.1), 'high': dyn_high, 'valid': True, 'type': 'dynamic_high'}
+        ]
+        
+        valid_zones = [z for z in all_zones if z['valid']]
+        self.zones[symbol] = valid_zones
+
+        # 🟢 لاگ‌گیری کامل (نمایش روند، سطوح داینامیک و ۳ اوردر بلاک نزدیک)
+        if obs:
+            sorted_obs = sorted(obs, key=lambda z: abs(price - (z['high'] + z['low']) / 2))
+            obs_str = " | ".join([f"[{_fmt(z['low'])} - {_fmt(z['high'])}]" for z in sorted_obs[:3]])
+        else:
+            obs_str = "None"
+
+        logger.log_system_event(f"📡 [MTF RADAR] {symbol} | Price: {_fmt(price)} | Trend: {trend}")
+        logger.log_system_event(f"   ↳ Dyn 10C High: {_fmt(dyn_high)} | Dyn 10C Low: {_fmt(dyn_low)}")
+        logger.log_system_event(f"   ↳ Historical OBs: {obs_str}")
+
+        # ۲. بررسی نزدیکی قیمت به زون‌ها
         for zone in valid_zones:
             dist = abs(price - (zone['high'] + zone['low']) / 2)
             if dist <= (ZONE_PROXIMITY_ATR * atr):
                 await self.check_mtf_setup(symbol, h2, zone, price, trend)
 
-    # =================================================================
-    # 🟢 تابع جدید: پیدا کردن اوردر بلاک‌ها (جایگزین analyze_zones قبلی)
-    # =================================================================
     def find_order_blocks(self, h2):
-        """
-        تشخیص اوردر بلاک بر اساس آخرین کندل مخالف قبل از یک حرکت قوی.
-        """
-        opens = h2['opens']
-        highs = h2['highs']
-        lows = h2['lows']
-        closes = h2['closes']
+        """تشخیص اوردر بلاک با عرض باریک (بر اساس بدنه)"""
+        opens, highs, lows, closes = h2['opens'], h2['highs'], h2['lows'], h2['closes']
         atr = h2['atr']
-        
         obs = []
         n = len(closes)
         
-        for i in range(1, n - OB_LOOKBACK):
-            # === تشخیص اوردر بلاک صعودی (Bullish OB) ===
-            # آخرین کندل نزولی (قرمز) قبل از یک حرکت صعودی قوی
-            if closes[i] < opens[i]:  # کندل قرمز
-                # بررسی حرکت صعودی قوی بعد از آن
-                move_high = max(highs[i+1:i+1+OB_LOOKBACK])
-                if move_high > highs[i] + (atr * 0.5):  # حرکت به اندازه کافی قوی
-                    obs.append({
-                        'low': lows[i], 'high': highs[i], 
-                        'valid': True, 'type': 'bullish'
-                    })
+        # حداکثر عرض مجاز زون (مثلا 0.5% قیمت یا نیم ATR)
+        max_width = _price(h2) * MAX_ZONE_WIDTH_PCT
+        
+        for i in range(1, n - 5):
+            # اوردر بلاک صعودی (آخرین کندل قرمز قبل از حرکت صعودی)
+            if closes[i] < opens[i]:
+                move_high = max(highs[i+1:i+6])
+                if move_high > highs[i] + (atr * 0.5):
+                    ob_low = min(opens[i], closes[i]) # استفاده از بدنه
+                    ob_high = max(opens[i], closes[i])
+                    if (ob_high - ob_low) > max_width: # اگر خیلی گشاد بود، از سایه استفاده نکن
+                        ob_high = ob_low + max_width
+                    obs.append({'low': ob_low, 'high': ob_high, 'valid': True, 'type': 'bullish_ob'})
             
-            # === تشخیص اوردر بلاک نزولی (Bearish OB) ===
-            # آخرین کندل صعودی (سبز) قبل از یک حرکت نزولی قوی
-            if closes[i] > opens[i]:  # کندل سبز
-                move_low = min(lows[i+1:i+1+OB_LOOKBACK])
-                if move_low < lows[i] - (atr * 0.5):  # حرکت نزولی قوی
-                    obs.append({
-                        'low': lows[i], 'high': highs[i], 
-                        'valid': True, 'type': 'bearish'
-                    })
+            # اوردر بلاک نزولی (آخرین کندل سبز قبل از حرکت نزولی)
+            if closes[i] > opens[i]:
+                move_low = min(lows[i+1:i+6])
+                if move_low < lows[i] - (atr * 0.5):
+                    ob_low = min(opens[i], closes[i])
+                    ob_high = max(opens[i], closes[i])
+                    if (ob_high - ob_low) > max_width:
+                        ob_low = ob_high - max_width
+                    obs.append({'low': ob_low, 'high': ob_high, 'valid': True, 'type': 'bearish_ob'})
         
         return obs
 
-    # =================================================================
-    # بقیه توابع (check_mtf_setup و _build_signal) بدون هیچ تغییری
-    # =================================================================
     async def check_mtf_setup(self, symbol, h2, zone, price, trend):
         zone_high, zone_low = zone['high'], zone['low']
         
@@ -141,41 +149,37 @@ class StrategyManager:
 
         signal = None
 
-        # ستاپ شکست (Breakout) - بدون تغییر
+        # ۱. شکست به بالا (Breakout UP)
         if h1_close > zone_high and h1_open < zone_high:
-            h1_body_out = h1_close - zone_high
-            h1_total_range = h1_high - h1_low
-            if h1_total_range > 0 and (h1_body_out / h1_total_range) >= 0.20:
+            if (h1_close - zone_high) / (h1_high - h1_low) >= 0.20:
+                # تاییدیه ۱۵ دقیقه: پولبک به زون و بسته شدن بالای آن
                 if m15_low <= zone_high and m15_close > zone_high and m15_close > m15_open:
                     if trend == "UP":
                         signal = self._build_signal(symbol, "LONG", "BREAKOUT", price, zone_low, zone_high, h2['atr'])
                     else:
-                        logger.log_system_event(f"⚠️ [{symbol}] شکست مقاومت رخ داد اما خلاف روند EMA است. سیگنال ارسال نشد.")
+                        logger.log_system_event(f"⚠️ [{symbol}] شکست مقاومت رخ داد اما خلاف روند EMA است.")
 
+        # ۲. شکست به پایین (Breakout DOWN)
         elif h1_close < zone_low and h1_open > zone_low:
-            h1_body_out = zone_low - h1_close
-            h1_total_range = h1_high - h1_low
-            if h1_total_range > 0 and (h1_body_out / h1_total_range) >= 0.20:
+            if (zone_low - h1_close) / (h1_high - h1_low) >= 0.20:
+                # تاییدیه ۱۵ دقیقه: پولبک به زون و بسته شدن زیر آن
                 if m15_high >= zone_low and m15_close < zone_low and m15_close < m15_open:
                     if trend == "DOWN":
                         signal = self._build_signal(symbol, "SHORT", "BREAKOUT", price, zone_high, zone_low, h2['atr'])
                     else:
-                        logger.log_system_event(f"⚠️ [{symbol}] شکست حمایت رخ داد اما خلاف روند EMA است. سیگنال ارسال نشد.")
+                        logger.log_system_event(f"⚠️ [{symbol}] شکست حمایت رخ داد اما خلاف روند EMA است.")
 
-        # ستاپ ریجکشن (Rejection) - بدون تغییر
+        # ۳. ریجکشن مقاومت (Rejection DOWN)
         elif h1_high >= zone_low and h1_close < zone_low and h1_close < h1_open:
             if m15_high >= zone_low and m15_close < zone_low and m15_close < m15_open:
                 if trend == "DOWN":
                     signal = self._build_signal(symbol, "SHORT", "REJECTION", price, zone_high, zone_low, h2['atr'])
-                else:
-                    logger.log_system_event(f"⚠️ [{symbol}] ریجکشن مقاومت رخ داد اما روند EMA صعودی است. سیگنال ارسال نشد.")
 
+        # ۴. ریجکشن حمایت (Rejection UP)
         elif h1_low <= zone_high and h1_close > zone_high and h1_close > h1_open:
             if m15_low <= zone_high and m15_close > zone_high and m15_close > m15_open:
                 if trend == "UP":
                     signal = self._build_signal(symbol, "LONG", "REJECTION", price, zone_low, zone_high, h2['atr'])
-                else:
-                    logger.log_system_event(f"⚠️ [{symbol}] ریجکشن حمایت رخ داد اما روند EMA نزولی است. سیگنال ارسال نشد.")
 
         if signal and self.telegram_bot:
             await self.telegram_bot.send_signal(signal)
