@@ -137,7 +137,7 @@ class StrategyManager:
                     logger.log_system_event(f"⚠️ [{symbol}] Failed Breakout! Price returned inside zone. Setup Cancelled.")
                     state.update({'state': 'IDLE', 'zone': None, 'direction': None})
 
-    def find_zones(self, data, lookback, atr, current_price):
+    def find_zones(self, data, lookback, atr, price): # 🟢 اصلاح نام پارامتر به price
         """تشخیص زون‌ها با عرض حداکثر 0.225%"""
         highs, lows, closes = data['highs'][-lookback:], data['lows'][-lookback:], data['closes'][-lookback:]
         swings = []
@@ -152,7 +152,7 @@ class StrategyManager:
         if not swings: return []
 
         # محدودیت عرض زون (حداکثر 0.225% قیمت)
-        max_width = current_price * self.ZONE_WIDTH_PCT
+        max_width = price * self.ZONE_WIDTH_PCT
 
         # خوشه‌بندی سطوح نزدیک
         swings.sort(key=lambda x: x['price'])
