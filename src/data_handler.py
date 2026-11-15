@@ -5,23 +5,14 @@ from logger import get_trading_logger
 
 logger = get_trading_logger()
 
-CANDLES_4H = 150
-CANDLES_2H = 50
-ATR_PERIOD = 14
-EMA_PERIOD = 200
-H4_MS = 4 * 60 * 60 * 1000
-H2_MS = 2 * 60 * 60 * 1000
-CANDLE_GRACE_SEC = 15
-RETRY_AFTER_FAIL_SEC = 90
-
 class MarketDataHandler:
     def __init__(self):
         self.session = HTTP(testnet=False)
         self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
-        self._cache_4h = {}
-        self._cache_2h = {}
-        self._next_fetch_4h = {}
-        self._next_fetch_2h = {}
+        self._cache = {}
+        self._next_fetch = {}
+        self.EMA_PERIOD = 200
+        self.ATR_PERIOD = 14
 
     async def start_data_collection(self):
         while True:
@@ -29,21 +20,28 @@ class MarketDataHandler:
 
     @staticmethod
     def _calculate_ema(prices, period):
-        if not prices: return 0.0, 0
+        if not prices: return 0.0
         used = min(period, len(prices))
         multiplier = 2 / (used + 1)
         ema = sum(prices[:used]) / used
         for price in prices[used:]:
             ema = (price - ema) * multiplier + ema
-        return ema, used
+        return ema
 
     @staticmethod
-    def _calculate_atr(highs, lows, closes, period=ATR_PERIOD):
+    def _calculate_atr(highs, lows, closes, period=14):
+        """محاسبه ATR استاندارد (Wilder's Smoothing)"""
         if len(closes) < period + 1: return 0.0
         trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])) for i in range(1, len(closes))]
-        return sum(trs[-period:]) / period
+        
+        # اولین ATR میانگین ساده است
+        atr = sum(trs[:period]) / period
+        # بقیه با فرمول وایلدر
+        for i in range(period, len(trs)):
+            atr = ((atr * (period - 1)) + trs[i]) / period
+        return atr
 
-    async def _fetch_candles(self, symbol, interval="240", limit=150):
+    async def _fetch_candles(self, symbol, interval="240", limit=100):
         resp = await asyncio.to_thread(
             self.session.get_kline, category="linear", symbol=symbol, interval=interval, limit=limit
         )
@@ -54,6 +52,7 @@ class MarketDataHandler:
         rows = resp['result']['list']
         if not rows: return None
 
+        # فقط کندل‌های بسته شده
         now_ms = int(time.time() * 1000)
         interval_ms = int(interval) * 60 * 1000
         rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]
@@ -64,14 +63,14 @@ class MarketDataHandler:
         lows = [float(r[3]) for r in rows]
         opens = [float(r[1]) for r in rows]
         
-        ema_200, ema_used = (self._calculate_ema(closes, EMA_PERIOD) if interval in ("240", "120") else (0, 0))
-        atr = self._calculate_atr(highs, lows, closes) if interval in ("240", "120") else 0.0
+        ema_200 = self._calculate_ema(closes, self.EMA_PERIOD) if interval == "240" else 0.0
+        atr = self._calculate_atr(highs, lows, closes, self.ATR_PERIOD)
 
         return {
             'times': [int(r[0]) for r in rows],
             'opens': opens, 'highs': highs, 'lows': lows, 'closes': closes,
             'close': closes[-1],
-            'ema_200': ema_200, 'ema_period_used': ema_used,
+            'ema_200': ema_200,
             'atr': atr, 'count': len(rows)
         }
 
@@ -84,55 +83,22 @@ class MarketDataHandler:
         except Exception:
             return None
 
-    async def get_4h_data(self, symbol):
-        try:
-            now = time.time()
-            if now >= self._next_fetch_4h.get(symbol, 0):
-                candles = await self._fetch_candles(symbol, "240", CANDLES_4H)
-                if candles:
-                    self._cache_4h[symbol] = candles
-                    next_close = (candles['times'][-1] + H4_MS) / 1000
-                    self._next_fetch_4h[symbol] = next_close + CANDLE_GRACE_SEC
-                else:
-                    self._next_fetch_4h[symbol] = now + RETRY_AFTER_FAIL_SEC
+    async def get_tf_data(self, symbol, interval):
+        """دریافت دیتای یک تایم‌فریم خاص با کش"""
+        cache_key = f"{symbol}_{interval}"
+        if time.time() < self._next_fetch.get(cache_key, 0):
+            cached = self._cache.get(cache_key)
+            if cached:
+                cached['price'] = await self._fetch_price(symbol) or cached['close']
+                return cached
 
-            cached = self._cache_4h.get(symbol)
-            if not cached: return None
-
-            price = await self._fetch_price(symbol)
-            h4 = dict(cached)
-            h4['price'] = price if price else cached['close']
-            return {'h4': h4}
-        except Exception as e:
-            logger.log_system_event(f"Error fetching 4H data for {symbol}: {e}")
-            return None
-
-    async def get_2h_data(self, symbol):
-        try:
-            now = time.time()
-            if now >= self._next_fetch_2h.get(symbol, 0):
-                candles = await self._fetch_candles(symbol, "120", CANDLES_2H)
-                if candles:
-                    self._cache_2h[symbol] = candles
-                    next_close = (candles['times'][-1] + H2_MS) / 1000
-                    self._next_fetch_2h[symbol] = next_close + CANDLE_GRACE_SEC
-                else:
-                    self._next_fetch_2h[symbol] = now + RETRY_AFTER_FAIL_SEC
-
-            cached = self._cache_2h.get(symbol)
-            if not cached: return None
-
-            price = await self._fetch_price(symbol)
-            h2 = dict(cached)
-            h2['price'] = price if price else cached['close']
-            return {'h2': h2}
-        except Exception as e:
-            logger.log_system_event(f"Error fetching 2H data for {symbol}: {e}")
-            return None
-
-    async def get_lower_tf_data(self, symbol, interval="60", limit=50):
-        try:
-            return await self._fetch_candles(symbol, interval, limit)
-        except Exception as e:
-            logger.log_system_event(f"Error fetching {interval}m data for {symbol}: {e}")
-            return None
+        # دریافت دیتای جدید
+        candles = await self._fetch_candles(symbol, interval, 200)
+        if candles:
+            self._cache[cache_key] = candles
+            interval_ms = int(interval) * 60 * 1000
+            next_close = (candles['times'][-1] + interval_ms) / 1000
+            self._next_fetch[cache_key] = next_close + 15
+            candles['price'] = await self._fetch_price(symbol) or candles['close']
+            return candles
+        return None
