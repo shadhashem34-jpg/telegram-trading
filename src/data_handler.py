@@ -63,7 +63,8 @@ class MarketDataHandler:
         lows = [float(r[3]) for r in rows]
         opens = [float(r[1]) for r in rows]
         
-        ema_200, ema_used = (self._calculate_ema(closes, EMA_PERIOD) if interval == "240" else (0, 0))
+        # 🟢 اصلاح: محاسبه EMA 200 برای هر دو تایم 4H و 2H
+        ema_200, ema_used = (self._calculate_ema(closes, EMA_PERIOD) if interval in ("240", "120") else (0, 0))
         atr = self._calculate_atr(highs, lows, closes) if interval in ("240", "120") else 0.0
 
         return {
@@ -84,32 +85,8 @@ class MarketDataHandler:
         except Exception:
             return None
 
-    async def get_4h_data(self, symbol):
-        try:
-            now = time.time()
-            if now >= self._next_fetch.get(symbol, 0):
-                candles = await self._fetch_candles(symbol, "240", CANDLES_4H + 1)
-                if candles:
-                    self._cache[symbol] = candles
-                    next_close = (candles['times'][-1] + 2 * H4_MS) / 1000
-                    self._next_fetch[symbol] = next_close + CANDLE_GRACE_SEC
-                else:
-                    self._next_fetch[symbol] = now + RETRY_AFTER_FAIL_SEC
-
-            cached = self._cache.get(symbol)
-            if not cached: return None
-
-            price = await self._fetch_price(symbol)
-            h4 = dict(cached)
-            h4['price'] = price if price else cached['close']
-            h4['price_live'] = bool(price)
-            return {'h4': h4}
-        except Exception as e:
-            logger.log_system_event(f"Error fetching 4H data for {symbol}: {e}")
-            return None
-
     async def get_2h_data(self, symbol):
-        """دیتای ۲ ساعته برای پیدا کردن اوردر بلاک‌ها"""
+        """دیتای ۲ ساعته برای پیدا کردن سطوح و تشخیص روند"""
         try:
             now = time.time()
             if now >= self._next_fetch_2h.get(symbol, 0):
