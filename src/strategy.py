@@ -20,7 +20,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V43 Started (4H Zones -> 1H Confirm -> 15M Retest)")
+        logger.log_system_event("🚀 V44 Started (1-Candle Pivot -> 4H Zones)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -45,10 +45,10 @@ class StrategyManager:
         # حداکثر عرض مجاز زون (۰.۲۵ درصد قیمت)
         max_width = current_price * self.MAX_ZONE_WIDTH_PCT
 
-        for i in range(2, len(highs) - 2):
+        # 🟢 تغییر یافته: بررسی ۱ کندل چپ و ۱ کندل راست
+        for i in range(1, len(highs) - 1):
             # مقاومت (سقف)
-            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-               highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
                 base = closes[i] 
                 wick = highs[i]  
                 
@@ -63,8 +63,7 @@ class StrategyManager:
                 swing_highs.append({'low': zone_low, 'high': zone_high, 'type': 'res'})
             
             # حمایت (کف)
-            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-               lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
                 base = closes[i] 
                 wick = lows[i]   
                 
@@ -130,7 +129,7 @@ class StrategyManager:
                 if h1_close < z['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below Res. Waiting for 15M Pullback...")
-                elif h1_close > z['high'] + (h4['atr'] * 0.5): # اگر برگشت بالا
+                elif h1_close > z['high'] + (h4['atr'] * 0.5): 
                     state.update({'state': 'IDLE', 'zone': None})
             elif state['direction'] == 'LONG':
                 if h1_close > z['high']:
@@ -147,13 +146,11 @@ class StrategyManager:
             m15_open = m15['opens'][-1]
 
             if state['direction'] == 'SHORT':
-                # سایه وارد زون شده اما بدنه زیر زون بسته شده
                 if m15_high >= z['low'] and m15_close < z['low'] and m15_close < m15_open:
                     logger.log_system_event(f"🏆 [{symbol}] SHORT Entry Triggered!")
                     self.send_signal(symbol, 'SHORT', m15_close, z, h4['atr'])
                     state.update({'state': 'IDLE', 'zone': None})
             elif state['direction'] == 'LONG':
-                # سایه وارد زون شده اما بدنه بالای زون بسته شده
                 if m15_low <= z['high'] and m15_close > z['high'] and m15_close > m15_open:
                     logger.log_system_event(f"🏆 [{symbol}] LONG Entry Triggered!")
                     self.send_signal(symbol, 'LONG', m15_close, z, h4['atr'])
@@ -170,6 +167,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V43_4H_Structure'
+            'strategy': 'V44_4H_Structure'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
