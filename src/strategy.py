@@ -12,7 +12,7 @@ class StrategyManager:
         self.active_setups = {} 
         
         # تنظیمات
-        self.LOOKBACK_CANDLES = 24  # بررسی ۲۴ کندل ۴ ساعته (۴ روز اخیر)
+        self.LOOKBACK_CANDLES = 24  # بررسی ۲۴ کندل ۴ ساعته
         self.ZONE_WIDTH_PCT = 0.0025 # عرض زون 0.25%
 
     def set_market_data_handler(self, handler):
@@ -20,7 +20,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V52 Started (Fractal Nearest Levels)")
+        logger.log_system_event("🚀 V53 Started (Body-Based Levels)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -34,59 +34,6 @@ class StrategyManager:
             
             await asyncio.sleep(180) 
 
-    def find_nearest_fractals(self, data, current_price):
-        """پیدا کردن نزدیک‌ترین سطوح بر اساس فراکتال (۲ کندل چپ/راست)"""
-        highs = data['highs'][-self.LOOKBACK_CANDLES:]
-        lows = data['lows'][-self.LOOKBACK_CANDLES:]
-        closes = data['closes'][-self.LOOKBACK_CANDLES:]
-        
-        swing_highs = []
-        swing_lows = []
-        max_width = current_price * self.ZONE_WIDTH_PCT
-
-        for i in range(2, len(highs) - 2):
-            # ۱. پیدا کردن فراکتال سقف
-            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
-               highs[i] > highs[i+1] and highs[i] > highs[i+2]:
-                base = closes[i]
-                wick = highs[i]
-                
-                # ساخت زون از بدنه به سمت سایه با سقف 0.25%
-                if abs(wick - base) > max_width:
-                    zone_low, zone_high = base, base + max_width
-                else:
-                    zone_low, zone_high = base, wick
-                
-                swing_highs.append({'low': zone_low, 'high': zone_high, 'type': 'res'})
-
-            # ۲. پیدا کردن فراکتال کف
-            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
-               lows[i] < lows[i+1] and lows[i] < lows[i+2]:
-                base = closes[i]
-                wick = lows[i]
-                
-                # ساخت زون از بدنه به سمت سایه با سقف 0.25%
-                if abs(wick - base) > max_width:
-                    zone_high, zone_low = base, base - max_width
-                else:
-                    zone_high, zone_low = base, wick
-                
-                swing_lows.append({'low': zone_low, 'high': zone_high, 'type': 'sup'})
-
-        # انتخاب نزدیک‌ترین سقف بالای قیمت
-        nearest_res = None
-        valid_highs = [z for z in swing_highs if z['low'] > current_price]
-        if valid_highs: 
-            nearest_res = min(valid_highs, key=lambda z: z['low'])
-
-        # انتخاب نزدیک‌ترین کف زیر قیمت
-        nearest_sup = None
-        valid_lows = [z for z in swing_lows if z['high'] < current_price]
-        if valid_lows: 
-            nearest_sup = max(valid_lows, key=lambda z: z['high'])
-
-        return nearest_res, nearest_sup
-
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
         h1 = await self.market_data.get_tf_data(symbol, "60")
@@ -97,12 +44,23 @@ class StrategyManager:
         price = h4['price'] 
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
         
-        res_4h, sup_4h = self.find_nearest_fractals(h4, price)
+        opens = h4['opens'][-self.LOOKBACK_CANDLES:]
+        closes = h4['closes'][-self.LOOKBACK_CANDLES:]
+        
+        if not opens or not closes: return
+
+        # 🟢 منطق جدید: پیدا کردن بالاترین و پایین‌ترین بدنه (Body)
+        # بدنه یعنی بیشترین و کمترین مقدار بین Open و Close
+        highest_body = max([max(o, c) for o, c in zip(opens, closes)])
+        lowest_body = min([min(o, c) for o, c in zip(opens, closes)])
+
+        # ساخت زون‌ها با عرض ۰.۲۵ درصد
+        res_zone = {'low': highest_body, 'high': highest_body + (highest_body * self.ZONE_WIDTH_PCT), 'type': 'res'}
+        sup_zone = {'low': lowest_body - (lowest_body * self.ZONE_WIDTH_PCT), 'high': lowest_body, 'type': 'sup'}
 
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
-        log_msg += "⚙️ 4H Levels (Fractal):\n"
-        log_msg += f"   ↳ Nearest Res: {res_4h['low']:.2f} - {res_4h['high']:.2f}\n" if res_4h else "   ↳ Nearest Res: None\n"
-        log_msg += f"   ↳ Nearest Sup: {sup_4h['low']:.2f} - {sup_4h['high']:.2f}\n" if sup_4h else "   ↳ Nearest Sup: None\n"
+        log_msg += f"   ↳ Nearest Res (Highest Body): {highest_body:.2f} | Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f}\n"
+        log_msg += f"   ↳ Nearest Sup (Lowest Body): {lowest_body:.2f} | Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f}\n"
         logger.log_system_event(log_msg)
 
         # --- ماشین وضعیت (State Machine) ---
@@ -110,7 +68,7 @@ class StrategyManager:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
 
         state = self.active_setups[symbol]
-        all_zones = [z for z in [res_4h, sup_4h] if z is not None]
+        all_zones = [res_zone, sup_zone]
 
         if state['state'] == 'IDLE':
             for z in all_zones:
@@ -128,11 +86,9 @@ class StrategyManager:
             h1_low = h1['lows'][-1]
             
             if state['direction'] == 'SHORT':
-                # شکست به پایین
                 if h1_close < z['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below Res. Waiting for 15M Retest...")
-                # ریجکشن
                 elif h1_high >= z['low'] and h1_close < z['low'] and h1_close < h1_open:
                      state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
                      logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Res. Waiting for 15M Retest...")
@@ -140,11 +96,9 @@ class StrategyManager:
                     state.update({'state': 'IDLE', 'zone': None})
             
             elif state['direction'] == 'LONG':
-                # شکست به بالا
                 if h1_close > z['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED above Sup. Waiting for 15M Retest...")
-                # ریجکشن
                 elif h1_low <= z['high'] and h1_close > z['high'] and h1_close > h1_open:
                      state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
                      logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Sup. Waiting for 15M Retest...")
@@ -180,6 +134,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V52_Fractal_Nearest'
+            'strategy': 'V53_Body_Levels'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
