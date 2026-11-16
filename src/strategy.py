@@ -15,7 +15,6 @@ class StrategyManager:
         # ---------- تنظیمات سطوح ----------
         self.LOOKBACK_CANDLES = 12       # ۲ روز = ۱۲ کندل ۴ ساعته
         self.MAX_LOOKBACK = 30           # اگر سطحی پیدا نشد تا اینجا گسترش بده
-        self.PIVOT_K = 2                 # تأیید پیوت فقط با k کندل سمت چپ
         self.ZONE_WIDTH_PCT = 0.0025     # حداکثر عرض زون 0.25%
         self.DROP_FORMING_CANDLE = 'auto'  # 'auto' | True | False
 
@@ -44,21 +43,24 @@ class StrategyManager:
     def _collect_candidates(self, o, h, l, c, price, lookback):
         O, H, L, C = o[-lookback:], h[-lookback:], l[-lookback:], c[-lookback:]
         n = len(O)
-        k = self.PIVOT_K
         res_c, sup_c = [], []
 
-        for i in range(n):
+        # از کندل آخر به عقب می‌رویم. یک بدنه فقط وقتی سطح معتبر است که
+        # هیچ کندل بعد از آن، بدنه‌ای بالاتر (برای مقاومت) یا پایین‌تر
+        # (برای حمایت) نساخته باشد؛ یعنی زیر بدنهٔ کندل‌های بعدی گم نشده باشد.
+        later_top = float('-inf')
+        later_bot = float('inf')
+        for i in range(n - 1, -1, -1):
             top = max(O[i], C[i])
             bot = min(O[i], C[i])
-            left = range(max(0, i - k), i)  # فقط سمت چپ؛ سمت راست تأیید نمی‌خواهد
 
-            # مقاومت: بالای قیمت و بالاتر/مساوی بدنه‌های k کندل قبلی
-            if top > price and all(top >= max(O[j], C[j]) for j in left):
+            if top > price and top >= later_top:
                 res_c.append((top, H[i]))
-
-            # حمایت: پایین قیمت و پایین‌تر/مساوی بدنه‌های k کندل قبلی
-            if bot < price and all(bot <= min(O[j], C[j]) for j in left):
+            if bot < price and bot <= later_bot:
                 sup_c.append((bot, L[i]))
+
+            later_top = max(later_top, top)
+            later_bot = min(later_bot, bot)
 
         return res_c, sup_c
 
@@ -80,13 +82,15 @@ class StrategyManager:
 
             if res_zone is None and r:
                 res_c = r
-                body, wick = min(r, key=lambda x: x[0])  # نزدیک‌ترین بالای قیمت
+                body = min(x[0] for x in r)  # نزدیک‌ترین بالای قیمت
+                wick = max(x[1] for x in r if x[0] == body)
                 top = min(max(wick, body), body * (1 + self.ZONE_WIDTH_PCT))
                 res_zone = {'low': body, 'high': top, 'type': 'res'}
 
             if sup_zone is None and s:
                 sup_c = s
-                body, wick = max(s, key=lambda x: x[0])  # نزدیک‌ترین پایین قیمت
+                body = max(x[0] for x in s)  # نزدیک‌ترین پایین قیمت
+                wick = min(x[1] for x in s if x[0] == body)
                 bottom = max(min(wick, body), body * (1 - self.ZONE_WIDTH_PCT))
                 sup_zone = {'low': bottom, 'high': body, 'type': 'sup'}
 
