@@ -12,7 +12,7 @@ class StrategyManager:
         self.active_setups = {} 
         
         # تنظیمات
-        self.LOOKBACK_CANDLES = 24  # بررسی ۲۴ کندل ۴ ساعته
+        self.LOOKBACK_CANDLES = 24  # بررسی ۲۴ کندل ۴ ساعته (۴ روز اخیر)
         self.ZONE_WIDTH_PCT = 0.0025 # عرض زون 0.25%
 
     def set_market_data_handler(self, handler):
@@ -20,7 +20,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V53 Started (Body-Based Levels)")
+        logger.log_system_event("🚀 V54 Started (Fractal Nearest Bodies)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -34,6 +34,51 @@ class StrategyManager:
             
             await asyncio.sleep(180) 
 
+    def find_nearest_fractal_bodies(self, data, current_price):
+        """پیدا کردن نزدیک‌ترین فراکتال‌ها و استفاده از بدنه آن‌ها"""
+        highs = data['highs'][-self.LOOKBACK_CANDLES:]
+        lows = data['lows'][-self.LOOKBACK_CANDLES:]
+        closes = data['closes'][-self.LOOKBACK_CANDLES:]
+        opens = data['opens'][-self.LOOKBACK_CANDLES:]
+        
+        pivot_highs_bodies = []
+        pivot_lows_bodies = []
+
+        # پیدا کردن فراکتال‌ها (۲ کندل چپ و ۲ کندل راست)
+        for i in range(2, len(highs) - 2):
+            # فراکتال سقف
+            if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+               highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+                # بدنه سقف = بالاترین مقدار بین Open و Close
+                body = max(opens[i], closes[i])
+                pivot_highs_bodies.append(body)
+
+            # فراکتال کف
+            if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+               lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+                # بدنه کف = پایین‌ترین مقدار بین Open و Close
+                body = min(opens[i], closes[i])
+                pivot_lows_bodies.append(body)
+
+        # انتخاب نزدیک‌ترین سقف بالای قیمت
+        res_candidates = [b for b in pivot_highs_bodies if b > current_price]
+        nearest_res_body = min(res_candidates) if res_candidates else None
+
+        # انتخاب نزدیک‌ترین کف زیر قیمت
+        sup_candidates = [b for b in pivot_lows_bodies if b < current_price]
+        nearest_sup_body = max(sup_candidates) if sup_candidates else None
+
+        res_zone = None
+        sup_zone = None
+        max_width_pct = self.ZONE_WIDTH_PCT
+
+        if nearest_res_body:
+            res_zone = {'low': nearest_res_body, 'high': nearest_res_body + (nearest_res_body * max_width_pct), 'type': 'res'}
+        if nearest_sup_body:
+            sup_zone = {'low': nearest_sup_body - (nearest_sup_body * max_width_pct), 'high': nearest_sup_body, 'type': 'sup'}
+
+        return res_zone, sup_zone
+
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
         h1 = await self.market_data.get_tf_data(symbol, "60")
@@ -44,23 +89,12 @@ class StrategyManager:
         price = h4['price'] 
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
         
-        opens = h4['opens'][-self.LOOKBACK_CANDLES:]
-        closes = h4['closes'][-self.LOOKBACK_CANDLES:]
-        
-        if not opens or not closes: return
-
-        # 🟢 منطق جدید: پیدا کردن بالاترین و پایین‌ترین بدنه (Body)
-        # بدنه یعنی بیشترین و کمترین مقدار بین Open و Close
-        highest_body = max([max(o, c) for o, c in zip(opens, closes)])
-        lowest_body = min([min(o, c) for o, c in zip(opens, closes)])
-
-        # ساخت زون‌ها با عرض ۰.۲۵ درصد
-        res_zone = {'low': highest_body, 'high': highest_body + (highest_body * self.ZONE_WIDTH_PCT), 'type': 'res'}
-        sup_zone = {'low': lowest_body - (lowest_body * self.ZONE_WIDTH_PCT), 'high': lowest_body, 'type': 'sup'}
+        res_4h, sup_4h = self.find_nearest_fractal_bodies(h4, price)
 
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
-        log_msg += f"   ↳ Nearest Res (Highest Body): {highest_body:.2f} | Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f}\n"
-        log_msg += f"   ↳ Nearest Sup (Lowest Body): {lowest_body:.2f} | Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f}\n"
+        log_msg += "⚙️ 4H Levels (Fractal Nearest Body):\n"
+        log_msg += f"   ↳ Nearest Res: {res_4h['low']:.2f} - {res_4h['high']:.2f}\n" if res_4h else "   ↳ Nearest Res: None\n"
+        log_msg += f"   ↳ Nearest Sup: {sup_4h['low']:.2f} - {sup_4h['high']:.2f}\n" if sup_4h else "   ↳ Nearest Sup: None\n"
         logger.log_system_event(log_msg)
 
         # --- ماشین وضعیت (State Machine) ---
@@ -68,7 +102,7 @@ class StrategyManager:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
 
         state = self.active_setups[symbol]
-        all_zones = [res_zone, sup_zone]
+        all_zones = [z for z in [res_4h, sup_4h] if z is not None]
 
         if state['state'] == 'IDLE':
             for z in all_zones:
@@ -134,6 +168,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V53_Body_Levels'
+            'strategy': 'V54_Fractal_Body'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
