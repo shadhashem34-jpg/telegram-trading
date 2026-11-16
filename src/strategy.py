@@ -40,7 +40,7 @@ class StrategyManager:
     # ------------------------------------------------------------------
     # پیدا کردن نزدیک‌ترین مقاومت و حمایت (بدنه → سایه)
     # ------------------------------------------------------------------
-    def _collect_candidates(self, o, h, l, c, price, lookback):
+    def _collect_candidates(self, o, h, l, c, price, lookback, trend):
         O, H, L, C = o[-lookback:], h[-lookback:], l[-lookback:], c[-lookback:]
         n = len(O)
         res_c, sup_c = [], []
@@ -50,21 +50,41 @@ class StrategyManager:
         # (برای حمایت) نساخته باشد؛ یعنی زیر بدنهٔ کندل‌های بعدی گم نشده باشد.
         later_top = float('-inf')
         later_bot = float('inf')
+        tops = [max(O[i], C[i]) for i in range(n)]
+        bots = [min(O[i], C[i]) for i in range(n)]
+        eps = price * 0.00001  # تحمل خطای اعشار؛ لبهٔ مشترک دو کندل «داخل» حساب نمی‌شود
+
+        # فیلتر «داخل بدنهٔ کندل قبلی (سمت چپ)» فقط برای سطحی که در جهت روند است:
+        #   روند نزولی: حمایت = پایین‌ترین بدنهٔ اخیر (فیلتر چپ دارد)
+        #               مقاومت = آخرین سقف پولبک (فیلتر چپ ندارد، چون کندل‌های
+        #               قدیمی‌تر در روند نزولی طبیعتاً بالاترند)
+        #   روند صعودی: برعکس
+        check_left_res = (trend == "UPTREND")
+        check_left_sup = (trend == "DOWNTREND")
+
+        def inside_left_body(level, idx):
+            for j in range(idx):
+                if bots[j] + eps < level < tops[j] - eps:
+                    return True
+            return False
+
         for i in range(n - 1, -1, -1):
-            top = max(O[i], C[i])
-            bot = min(O[i], C[i])
+            top = tops[i]
+            bot = bots[i]
 
             if top > price and top >= later_top:
-                res_c.append((top, H[i]))
+                if not (check_left_res and inside_left_body(top, i)):
+                    res_c.append((top, H[i]))
             if bot < price and bot <= later_bot:
-                sup_c.append((bot, L[i]))
+                if not (check_left_sup and inside_left_body(bot, i)):
+                    sup_c.append((bot, L[i]))
 
             later_top = max(later_top, top)
             later_bot = min(later_bot, bot)
 
         return res_c, sup_c
 
-    def _find_nearest_levels(self, h4, price):
+    def _find_nearest_levels(self, h4, price, trend):
         o, h, l, c = h4['opens'], h4['highs'], h4['lows'], h4['closes']
         # حذف کندل در حال تشکیل فقط وقتی که واقعاً ناقص است:
         # کندل ناقص Close آن تقریباً برابر قیمت جاری است.
@@ -78,7 +98,7 @@ class StrategyManager:
         res_c, sup_c = [], []
 
         for lookback in (self.LOOKBACK_CANDLES, self.MAX_LOOKBACK):
-            r, s = self._collect_candidates(o, h, l, c, price, lookback)
+            r, s = self._collect_candidates(o, h, l, c, price, lookback, trend)
 
             if res_zone is None and r:
                 res_c = r
@@ -111,7 +131,7 @@ class StrategyManager:
         price = h4['price']
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
 
-        res_zone, sup_zone, res_c, sup_c = self._find_nearest_levels(h4, price)
+        res_zone, sup_zone, res_c, sup_c = self._find_nearest_levels(h4, price, trend)
         if not res_zone or not sup_zone:
             logger.log_system_event(
                 f"⚠️ {symbol}: level not found (res={bool(res_zone)}, sup={bool(sup_zone)})"
