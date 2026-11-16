@@ -17,7 +17,7 @@ class StrategyManager:
         self.MAX_LOOKBACK = 30           # اگر سطحی پیدا نشد تا اینجا گسترش بده
         self.PIVOT_K = 2                 # تأیید پیوت فقط با k کندل سمت چپ
         self.ZONE_WIDTH_PCT = 0.0025     # حداکثر عرض زون 0.25%
-        self.DROP_FORMING_CANDLE = True  # کندل آخر (در حال تشکیل) حذف شود
+        self.DROP_FORMING_CANDLE = 'auto'  # 'auto' | True | False
 
     def set_market_data_handler(self, handler):
         self.market_data = handler
@@ -64,7 +64,12 @@ class StrategyManager:
 
     def _find_nearest_levels(self, h4, price):
         o, h, l, c = h4['opens'], h4['highs'], h4['lows'], h4['closes']
-        if self.DROP_FORMING_CANDLE:
+        # حذف کندل در حال تشکیل فقط وقتی که واقعاً ناقص است:
+        # کندل ناقص Close آن تقریباً برابر قیمت جاری است.
+        if self.DROP_FORMING_CANDLE == 'auto':
+            if abs(c[-1] - price) <= price * 0.0002:
+                o, h, l, c = o[:-1], h[:-1], l[:-1], c[:-1]
+        elif self.DROP_FORMING_CANDLE:
             o, h, l, c = o[:-1], h[:-1], l[:-1], c[:-1]
 
         res_zone, sup_zone = None, None
@@ -109,7 +114,9 @@ class StrategyManager:
             )
             return
 
+        last3 = [(round(h4['opens'][i], 2), round(h4['closes'][i], 2)) for i in (-3, -2, -1)]
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
+        log_msg += f"   ↳ Last 3 candles (open,close): {last3}\n"
         log_msg += (f"   ↳ Res Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f} "
                     f"| candidates(body): {sorted(round(x[0], 2) for x in res_c)}\n")
         log_msg += (f"   ↳ Sup Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f} "
