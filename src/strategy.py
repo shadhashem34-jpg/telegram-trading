@@ -12,7 +12,7 @@ class StrategyManager:
         self.active_setups = {} 
         
         # تنظیمات
-        self.LOOKBACK_CANDLES = 12  # ۱۲ کندل ۴ ساعته = ۲ روز گذشته
+        self.LOOKBACK_CANDLES = 24  # بررسی ۲۴ کندل ۴ ساعته (۴ روز اخیر)
         self.ZONE_WIDTH_PCT = 0.0025 # 0.25%
 
     def set_market_data_handler(self, handler):
@@ -20,7 +20,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V49 Started (Simple Max/Min Close)")
+        logger.log_system_event("🚀 V50 Started (Nearest Closest Body Levels)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         
@@ -44,20 +44,29 @@ class StrategyManager:
         price = h4['price'] 
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
         
-        # 🟢 پیدا کردن بالاترین و پایین‌ترین بدنه (Close) در ۱۲ کندل اخیر ۴ ساعته
+        # 🟢 منطق جدید: پیدا کردن نزدیک‌ترین سطح بالای قیمت و زیر قیمت
         recent_closes = h4['closes'][-self.LOOKBACK_CANDLES:]
         if not recent_closes: return
 
-        highest_close = max(recent_closes)
-        lowest_close = min(recent_closes)
+        # مقاومت: بدنه‌هایی که بالای قیمت فعلی هستند -> انتخاب پایین‌ترین (نزدیک‌ترین)
+        res_candidates = [c for c in recent_closes if c > price]
+        nearest_res_base = min(res_candidates) if res_candidates else None
 
-        # ساخت زون‌ها با عرض ۰.۲۵ درصد
-        res_zone = {'low': highest_close, 'high': highest_close + (highest_close * self.ZONE_WIDTH_PCT), 'type': 'res'}
-        sup_zone = {'low': lowest_close - (lowest_close * self.ZONE_WIDTH_PCT), 'high': lowest_close, 'type': 'sup'}
+        # حمایت: بدنه‌هایی که زیر قیمت فعلی هستند -> انتخاب بالاترین (نزدیک‌ترین)
+        sup_candidates = [c for c in recent_closes if c < price]
+        nearest_sup_base = max(sup_candidates) if sup_candidates else None
+
+        res_zone = None
+        sup_zone = None
+
+        if nearest_res_base:
+            res_zone = {'low': nearest_res_base, 'high': nearest_res_base + (nearest_res_base * self.ZONE_WIDTH_PCT), 'type': 'res'}
+        if nearest_sup_base:
+            sup_zone = {'low': nearest_sup_base - (nearest_sup_base * self.ZONE_WIDTH_PCT), 'high': nearest_sup_base, 'type': 'sup'}
 
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
-        log_msg += f"   ↳ Highest Close (Res): {highest_close:.2f} | Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f}\n"
-        log_msg += f"   ↳ Lowest Close (Sup): {lowest_close:.2f} | Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f}\n"
+        log_msg += f"   ↳ Nearest Res: {res_zone['low']:.2f} - {res_zone['high']:.2f}\n" if res_zone else "   ↳ Nearest Res: None\n"
+        log_msg += f"   ↳ Nearest Sup: {sup_zone['low']:.2f} - {sup_zone['high']:.2f}\n" if sup_zone else "   ↳ Nearest Sup: None\n"
         logger.log_system_event(log_msg)
 
         # --- ماشین وضعیت (State Machine) ---
@@ -65,14 +74,14 @@ class StrategyManager:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
 
         state = self.active_setups[symbol]
-        all_zones = [res_zone, sup_zone]
+        all_zones = [z for z in [res_zone, sup_zone] if z is not None]
 
         if state['state'] == 'IDLE':
             for z in all_zones:
                 if z['low'] <= price <= z['high']:
                     direction = 'SHORT' if z['type'] == 'res' else 'LONG'
                     state.update({'state': 'WAIT_1H_BREAK', 'zone': z, 'direction': direction})
-                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} Zone. Waiting for 1H Breakout/Rejection...")
+                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} Zone ({z['low']:.2f}-{z['high']:.2f}). Waiting for 1H Breakout/Rejection...")
                     break
 
         elif state['state'] == 'WAIT_1H_BREAK':
@@ -80,11 +89,9 @@ class StrategyManager:
             h1_close = h1['closes'][-1]
             
             if state['direction'] == 'SHORT':
-                # شکست به پایین
                 if h1_close < z['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below Res. Waiting for 15M Retest...")
-                # ریجکشن
                 elif h1_close < z['high'] and h1_close < h1['opens'][-1] and h1['highs'][-1] >= z['low']:
                      state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
                      logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Res. Waiting for 15M Retest...")
@@ -92,11 +99,9 @@ class StrategyManager:
                     state.update({'state': 'IDLE', 'zone': None})
             
             elif state['direction'] == 'LONG':
-                # شکست به بالا
                 if h1_close > z['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED above Sup. Waiting for 15M Retest...")
-                # ریجکشن
                 elif h1_close > z['low'] and h1_close > h1['opens'][-1] and h1['lows'][-1] <= z['high']:
                      state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
                      logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Sup. Waiting for 15M Retest...")
@@ -132,6 +137,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V49_Simple'
+            'strategy': 'V50_Closest_Body'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
