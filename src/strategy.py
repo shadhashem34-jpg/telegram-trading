@@ -151,6 +151,13 @@ class StrategyManager:
 
     # ------------------------------------------------------------------
     @staticmethod
+    def _fmt_cands(cands, side, price):
+        xs = sorted((x for x in cands if x['side'] == side), key=lambda x: abs(x['level'] - price))
+        return " ; ".join(
+            f"{x['level']:.2f}|{x['age']}|{x['body_atr']:.2f}|{x['touches']}" for x in xs
+        ) or "-"
+
+    @staticmethod
     def _dist_pct(z, price):
         if z['low'] <= price <= z['high']:
             return 0.0
@@ -229,8 +236,8 @@ class StrategyManager:
             f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
             f"   ↳ Res Zone: {self._fmt_zone(res_zone)}\n"
             f"   ↳ Sup Zone: {self._fmt_zone(sup_zone)}\n"
-            f"   ↳ res candidates: {sorted(round(x['level'], 2) for x in cands if x['side'] == 'res')}\n"
-            f"   ↳ sup candidates: {sorted((round(x['level'], 2) for x in cands if x['side'] == 'sup'), reverse=True)}"
+            f"   ↳ RES cands (level|age|body/ATR|touches): {self._fmt_cands(cands, 'res', price)}\n"
+            f"   ↳ SUP cands (level|age|body/ATR|touches): {self._fmt_cands(cands, 'sup', price)}"
         )
 
         state = self.active_setups.setdefault(
