@@ -21,7 +21,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V57 Started (Fast Breakdown Logic - Fixed)")
+        logger.log_system_event("🚀 V58 Started (Fixed Level Selection)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -86,7 +86,8 @@ class StrategyManager:
 
             if res_zone is None and r:
                 res_c = r
-                body = min(x[0] for x in r) 
+                # 🛠️ فقط همین خط تغییر کرد (از min به max)
+                body = max(x[0] for x in r) 
                 wick = max(x[1] for x in r if x[0] == body)
                 top = min(max(wick, body), body * (1 + self.ZONE_WIDTH_PCT))
                 res_zone = {'low': body, 'high': top, 'type': 'res'}
@@ -136,7 +137,7 @@ class StrategyManager:
 
         state = self.active_setups[symbol]
         
-        # 🛠️ FIX: تعریف all_zones که جا افتاده بود
+        # 🛠️ تعریف all_zones
         all_zones = [res_zone, sup_zone]
         
         h1_close = h1['closes'][-1]
@@ -219,6 +220,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V57_Fast_Breakout'
+            'strategy': 'V58_Fixed_Levels'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
