@@ -21,7 +21,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V57 Started (Fast Breakdown Logic)")
+        logger.log_system_event("🚀 V57 Started (Fast Breakdown Logic - Fixed)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -116,28 +116,43 @@ class StrategyManager:
 
         res_zone, sup_zone, res_c, sup_c = self._find_nearest_levels(h4, price, trend)
         if not res_zone or not sup_zone:
+            logger.log_system_event(
+                f"⚠️ {symbol}: level not found (res={bool(res_zone)}, sup={bool(sup_zone)})"
+            )
             return
+
+        # 📊 برگرداندن لاگ‌های کامل سطوح
+        last3 = [(round(h4['opens'][i], 2), round(h4['closes'][i], 2)) for i in (-3, -2, -1)]
+        log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
+        log_msg += f"   ↳ Last 3 candles (open,close): {last3}\n"
+        log_msg += (f"   ↳ Res Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f} "
+                    f"| candidates(body): {sorted(round(x[0], 2) for x in res_c)}\n")
+        log_msg += (f"   ↳ Sup Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f} "
+                    f"| candidates(body): {sorted((round(x[0], 2) for x in sup_c), reverse=True)}\n")
+        logger.log_system_event(log_msg)
 
         if symbol not in self.active_setups:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
 
         state = self.active_setups[symbol]
+        
+        # 🛠️ FIX: تعریف all_zones که جا افتاده بود
+        all_zones = [res_zone, sup_zone]
+        
         h1_close = h1['closes'][-1]
         h1_open = h1['opens'][-1]
         h1_high = h1['highs'][-1]
         h1_low = h1['lows'][-1]
 
-        # 🚀 FIX: منطق تشخیص سریع شکست (بدون نیاز به ورود دقیق به زون)
         if state['state'] == 'IDLE':
-            # 1. چک کردن شکست سریع نزولی از مقاومت (بدنه 1 ساعته زیر مقاومت بسته شد)
+            # 1. چک کردن شکست سریع نزولی از مقاومت
             if res_zone and h1_close < res_zone['low'] and h1_close < h1_open:
-                # مطمئن بشیم که کندل قبلی بالای مقاومت بوده (یعنی شکست واقعی رخ داده)
                 if h1['highs'][-2] >= res_zone['low']: 
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': res_zone, 'direction': 'SHORT'})
                     logger.log_system_event(f"⚡ [{symbol}] Fast 1H Breakdown below Res! Waiting for 15M Retest...")
                     return
 
-            # 2. چک کردن شکست سریع صعودی از حمایت (بدنه 1 ساعته بالای حمایت بسته شد)
+            # 2. چک کردن شکست سریع صعودی از حمایت
             if sup_zone and h1_close > sup_zone['high'] and h1_close > h1_open:
                 if h1['lows'][-2] <= sup_zone['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': sup_zone, 'direction': 'LONG'})
