@@ -115,7 +115,6 @@ class StrategyManager:
         """
         اول ۴ ساعته (دقیقاً مثل قبل).
         اگر یکی از سطوح پیدا نشد → همان سطح از کندل‌های بسته‌شده ۱ ساعته.
-        اگر ۱ ساعته هم نداد → None باقی می‌ماند و لاگ هشدار ثبت می‌شود.
         """
         res_zone, sup_zone, res_c, sup_c = self._levels_from_candles(
             h4, price, trend, self.DROP_FORMING_CANDLE
@@ -125,7 +124,6 @@ class StrategyManager:
                   "sup": "4H" if sup_zone else None}
 
         if (res_zone is None or sup_zone is None) and h1 is not None:
-            # فقط کندل‌های بسته‌شده ۱ ساعته (data_handler خودش کندل در حال اجرا را حذف می‌کند)
             r1, s1, r1c, s1c = self._levels_from_candles(
                 h1, price, trend, drop_forming=False
             )
@@ -139,7 +137,7 @@ class StrategyManager:
         return res_zone, sup_zone, res_c, sup_c, source
 
     # ==========================================================
-    #  پردازش نماد — منطق شکست/ریجکشن/پولبک مثل قبل
+    #  پردازش نماد
     # ==========================================================
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
@@ -156,15 +154,20 @@ class StrategyManager:
         res_zone, sup_zone, res_c, sup_c, source = self._find_nearest_levels(h4, h1, price, trend)
 
         if not res_zone or not sup_zone:
+            extra = ""
+            if res_zone:
+                extra += f" | Res={res_zone['low']:.2f}-{res_zone['high']:.2f}({source['res']})"
+            if sup_zone:
+                extra += f" | Sup={sup_zone['low']:.2f}-{sup_zone['high']:.2f}({source['sup']})"
             logger.log_system_event(
                 f"⚠️ {symbol}: level not found "
                 f"(res={bool(res_zone)}, sup={bool(sup_zone)}) | "
                 f"price={price:.4f} | ema200={h4['ema_200']:.4f} | "
-                f"source(res={source['res']}, sup={source['sup']})"
+                f"source(res={source['res']}, sup={source['sup']}){extra}"
             )
             return
 
-        # 📊 لاگ سطوح (مثل قبل + منبع هر سطح)
+        # 📊 لاگ سطوح
         last3 = [(round(h4['opens'][i], 2), round(h4['closes'][i], 2)) for i in (-3, -2, -1)]
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
         log_msg += f"   ↳ Last 3 candles (open,close): {last3}\n"
