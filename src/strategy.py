@@ -16,7 +16,7 @@ class StrategyManager:
         self.ZONE_WIDTH_PCT = 0.0025
         self.DROP_FORMING_CANDLE = 'auto'
 
-        # 🔒 قفل تک‌سیگنال (جلوگیری از ارسال تکراری روی همان کندل)
+        # 🔒 قفل تک‌سیگنال
         self.last_signal_h1 = {}
         self.last_signal_15m = {}
 
@@ -25,7 +25,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V59 Started (Trend Gate + Correct Setup)")
+        logger.log_system_event("🚀 V60 Started (4H levels + 1H fallback for missing level)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -39,6 +39,9 @@ class StrategyManager:
 
             await asyncio.sleep(180)
 
+    # ==========================================================
+    #  سطح‌یابی — دست‌نخورده، فقط منبع کندل قابل انتخاب شده
+    # ==========================================================
     def _collect_candidates(self, o, h, l, c, price, lookback, trend):
         O, H, L, C = o[-lookback:], h[-lookback:], l[-lookback:], c[-lookback:]
         n = len(O)
@@ -74,12 +77,13 @@ class StrategyManager:
 
         return res_c, sup_c
 
-    def _find_nearest_levels(self, h4, price, trend):
-        o, h, l, c = h4['opens'], h4['highs'], h4['lows'], h4['closes']
-        if self.DROP_FORMING_CANDLE == 'auto':
+    def _levels_from_candles(self, data, price, trend, drop_forming):
+        """همان منطق قبلی؛ فقط ورودی‌اش کندل‌های یک تایم‌فریم است."""
+        o, h, l, c = data['opens'], data['highs'], data['lows'], data['closes']
+        if drop_forming == 'auto':
             if abs(c[-1] - price) <= price * 0.0002:
                 o, h, l, c = o[:-1], h[:-1], l[:-1], c[:-1]
-        elif self.DROP_FORMING_CANDLE:
+        elif drop_forming:
             o, h, l, c = o[:-1], h[:-1], l[:-1], c[:-1]
 
         res_zone, sup_zone = None, None
@@ -107,31 +111,66 @@ class StrategyManager:
 
         return res_zone, sup_zone, res_c, sup_c
 
+    def _find_nearest_levels(self, h4, h1, price, trend):
+        """
+        اول ۴ ساعته (دقیقاً مثل قبل).
+        اگر یکی از سطوح پیدا نشد → همان سطح از کندل‌های بسته‌شده ۱ ساعته.
+        اگر ۱ ساعته هم نداد → None باقی می‌ماند و لاگ هشدار ثبت می‌شود.
+        """
+        res_zone, sup_zone, res_c, sup_c = self._levels_from_candles(
+            h4, price, trend, self.DROP_FORMING_CANDLE
+        )
+
+        source = {"res": "4H" if res_zone else None,
+                  "sup": "4H" if sup_zone else None}
+
+        if (res_zone is None or sup_zone is None) and h1 is not None:
+            # فقط کندل‌های بسته‌شده ۱ ساعته (data_handler خودش کندل در حال اجرا را حذف می‌کند)
+            r1, s1, r1c, s1c = self._levels_from_candles(
+                h1, price, trend, drop_forming=False
+            )
+            if res_zone is None and r1:
+                res_zone, res_c = r1, r1c
+                source["res"] = "1H"
+            if sup_zone is None and s1:
+                sup_zone, sup_c = s1, s1c
+                source["sup"] = "1H"
+
+        return res_zone, sup_zone, res_c, sup_c, source
+
+    # ==========================================================
+    #  پردازش نماد — منطق شکست/ریجکشن/پولبک مثل قبل
+    # ==========================================================
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
         h1 = await self.market_data.get_tf_data(symbol, "60")
         m15 = await self.market_data.get_tf_data(symbol, "15")
 
         if not all([h4, h1, m15]):
+            logger.log_system_event(f"❌ {symbol}: داده‌ی تایم‌فریم ناقص است (h4={bool(h4)}, h1={bool(h1)}, m15={bool(m15)})")
             return
 
         price = h4['price']
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
 
-        res_zone, sup_zone, res_c, sup_c = self._find_nearest_levels(h4, price, trend)
+        res_zone, sup_zone, res_c, sup_c, source = self._find_nearest_levels(h4, h1, price, trend)
+
         if not res_zone or not sup_zone:
             logger.log_system_event(
-                f"⚠️ {symbol}: level not found (res={bool(res_zone)}, sup={bool(sup_zone)})"
+                f"⚠️ {symbol}: level not found "
+                f"(res={bool(res_zone)}, sup={bool(sup_zone)}) | "
+                f"price={price:.4f} | ema200={h4['ema_200']:.4f} | "
+                f"source(res={source['res']}, sup={source['sup']})"
             )
             return
 
-        # 📊 برگرداندن لاگ‌های کامل سطوح
+        # 📊 لاگ سطوح (مثل قبل + منبع هر سطح)
         last3 = [(round(h4['opens'][i], 2), round(h4['closes'][i], 2)) for i in (-3, -2, -1)]
         log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
         log_msg += f"   ↳ Last 3 candles (open,close): {last3}\n"
-        log_msg += (f"   ↳ Res Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f} "
+        log_msg += (f"   ↳ Res Zone [{source['res']}]: {res_zone['low']:.2f} - {res_zone['high']:.2f} "
                     f"| candidates(body): {sorted(round(x[0], 2) for x in res_c)}\n")
-        log_msg += (f"   ↳ Sup Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f} "
+        log_msg += (f"   ↳ Sup Zone [{source['sup']}]: {sup_zone['low']:.2f} - {sup_zone['high']:.2f} "
                     f"| candidates(body): {sorted((round(x[0], 2) for x in sup_c), reverse=True)}\n")
         logger.log_system_event(log_msg)
 
@@ -149,14 +188,14 @@ class StrategyManager:
         m15_time = m15['times'][-1]
 
         if state['state'] == 'IDLE':
-            # ⚡ Fast Rejection SHORT — فقط در DOWNTREND
+            # ⚡ Fast Rejection SHORT — فقط DOWNTREND
             if trend == "DOWNTREND" and res_zone and h1_close < res_zone['low'] and h1_close < h1_open:
                 if h1['highs'][-2] >= res_zone['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': res_zone, 'direction': 'SHORT'})
                     logger.log_system_event(f"⚡ [{symbol}] Fast 1H Rejection at Res! Waiting for 15M Retest...")
                     return
 
-            # ⚡ Fast Rejection LONG — فقط در UPTREND
+            # ⚡ Fast Rejection LONG — فقط UPTREND
             if trend == "UPTREND" and sup_zone and h1_close > sup_zone['high'] and h1_close > h1_open:
                 if h1['lows'][-2] <= sup_zone['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': sup_zone, 'direction': 'LONG'})
@@ -167,10 +206,8 @@ class StrategyManager:
             for z in all_zones:
                 if z['low'] <= price <= z['high']:
                     direction = 'SHORT' if trend == "DOWNTREND" else 'LONG'
-                    if z['type'] == 'res':
-                        setup_name = "Breakout" if direction == 'LONG' else "Rejection"
-                    else:
-                        setup_name = "Rejection" if direction == 'LONG' else "Breakdown"
+                    setup_name = ("Breakout" if direction == 'LONG' else "Rejection") if z['type'] == 'res' \
+                                 else ("Rejection" if direction == 'LONG' else "Breakdown")
                     state.update({'state': 'WAIT_1H_BREAK', 'zone': z, 'direction': direction})
                     logger.log_system_event(
                         f"🔔 [{symbol}] Price in {z['type'].upper()} Zone "
@@ -216,7 +253,7 @@ class StrategyManager:
                     triggered = True
 
             if triggered:
-                # 🔒 قفل تک‌سیگنال: روی همان کندل ۱ ساعته یا ۱۵ دقیقه‌ای، دوبار ارسال نکن
+                # 🔒 قفل تک‌سیگنال
                 if (self.last_signal_h1.get(symbol) == h1_time or
                         self.last_signal_15m.get(symbol) == m15_time):
                     return
@@ -239,6 +276,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V59_TrendGate'
+            'strategy': 'V60_TrendGate_1HFallback'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
