@@ -25,7 +25,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V60 Started (Pure Levels + 1H Fallback)")
+        logger.log_system_event("🚀 V62 Started (Wick-based SL + Pure Levels)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -40,7 +40,7 @@ class StrategyManager:
             await asyncio.sleep(180)
 
     # ==========================================================
-    #  سطح‌یابی — دقیقاً همون منطق قبلی
+    #  سطح‌یابی — دست‌نخورده
     # ==========================================================
     def _collect_candidates(self, o, h, l, c, price, lookback, trend):
         O, H, L, C = o[-lookback:], h[-lookback:], l[-lookback:], c[-lookback:]
@@ -186,21 +186,21 @@ class StrategyManager:
         m15_time = m15['times'][-1]
 
         if state['state'] == 'IDLE':
-            # ⚡ Fast Rejection SHORT — فقط DOWNTREND
+            # ⚡ Fast Rejection SHORT
             if trend == "DOWNTREND" and res_zone and h1_close < res_zone['low'] and h1_close < h1_open:
                 if h1['highs'][-2] >= res_zone['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': res_zone, 'direction': 'SHORT'})
                     logger.log_system_event(f"⚡ [{symbol}] Fast 1H Rejection at Res! Waiting for 15M Retest...")
                     return
 
-            # ⚡ Fast Rejection LONG — فقط UPTREND
+            # ⚡ Fast Rejection LONG
             if trend == "UPTREND" and sup_zone and h1_close > sup_zone['high'] and h1_close > h1_open:
                 if h1['lows'][-2] <= sup_zone['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': sup_zone, 'direction': 'LONG'})
                     logger.log_system_event(f"⚡ [{symbol}] Fast 1H Rejection at Sup! Waiting for 15M Retest...")
                     return
 
-            # 🔔 Touch — جهت همیشه هم‌جهت روند
+            # 🔔 Touch
             for z in all_zones:
                 if z['low'] <= price <= z['high']:
                     direction = 'SHORT' if trend == "DOWNTREND" else 'LONG'
@@ -257,15 +257,24 @@ class StrategyManager:
                     return
 
                 logger.log_system_event(f"🏆 [{symbol}] {state['direction']} Entry Triggered!")
-                self.send_signal(symbol, state['direction'], m15_close, z, h4['atr'])
+                # پاس دادن کندل m15 به تابع سیگنال برای محاسبه استاپ بر اساس سایه
+                self.send_signal(symbol, state['direction'], m15_close, z, h4['atr'], m15_high, m15_low)
                 self.last_signal_h1[symbol] = h1_time
                 self.last_signal_15m[symbol] = m15_time
                 state.update({'state': 'IDLE', 'zone': None})
 
-    def send_signal(self, symbol, direction, entry, zone, atr):
+    def send_signal(self, symbol, direction, entry, zone, atr, m15_high, m15_low):
         if not self.telegram_bot:
             return
-        sl = zone['high'] if direction == 'SHORT' else zone['low']
+            
+        # 🎯 محاسبه استاپ‌لاس بر اساس سایه کندل ۱۵ دقیقه‌ای
+        if direction == 'SHORT':
+            # استاپ بالاتر از بالاترین سایه (چه داخل زون باشه چه بالاتر)
+            sl = max(zone['high'], m15_high)
+        else:
+            # استاپ پایین‌تر از پایین‌ترین سایه
+            sl = min(zone['low'], m15_low)
+            
         risk = abs(entry - sl)
         if risk < atr * 0.2:
             risk = atr * 1.0
@@ -274,6 +283,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V60_TrendGate_1HFallback'
+            'strategy': 'V62_WickSL'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
