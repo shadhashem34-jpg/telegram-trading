@@ -20,16 +20,12 @@ class StrategyManager:
         self.last_signal_h1 = {}
         self.last_signal_15m = {}
 
-        # 🧠 حافظه سطوح شکسته‌شده (Level Memory)
-        # ساختار: {symbol: {'zone': zone_dict, 'break_time': timestamp, 'direction': 'SHORT'/'LONG'}}
-        self.broken_levels = {}
-
     def set_market_data_handler(self, handler):
         self.market_data = handler
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V61 Started (Level Memory + Sharp Drop Recovery)")
+        logger.log_system_event("🚀 V60 Started (Pure Levels + 1H Fallback)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -44,7 +40,7 @@ class StrategyManager:
             await asyncio.sleep(180)
 
     # ==========================================================
-    #  سطح‌یابی — دست‌نخورده
+    #  سطح‌یابی — دقیقاً همون منطق قبلی
     # ==========================================================
     def _collect_candidates(self, o, h, l, c, price, lookback, trend):
         O, H, L, C = o[-lookback:], h[-lookback:], l[-lookback:], c[-lookback:]
@@ -136,52 +132,6 @@ class StrategyManager:
         return res_zone, sup_zone, res_c, sup_c, source
 
     # ==========================================================
-    #  🧠 مدیریت حافظه سطوح شکسته‌شده
-    # ==========================================================
-    def _update_memory(self, symbol, res_zone, sup_zone, price, h4_time, atr):
-        """ذخیره سطوح فعلی در حافظه و پاکسازی سطوح قدیمی"""
-        now = datetime.now(timezone.utc)
-        
-        # اگر سطحی تازه شکسته شد، آن را در حافظه نگه دار
-        if res_zone and price < res_zone['low']:
-            if symbol not in self.broken_levels or self.broken_levels[symbol]['zone'] != res_zone:
-                self.broken_levels[symbol] = {
-                    'zone': res_zone, 'break_time': now, 'direction': 'SHORT', 'h4_time': h4_time
-                }
-        elif sup_zone and price > sup_zone['high']:
-            if symbol not in self.broken_levels or self.broken_levels[symbol]['zone'] != sup_zone:
-                self.broken_levels[symbol] = {
-                    'zone': sup_zone, 'break_time': now, 'direction': 'LONG', 'h4_time': h4_time
-                }
-        elif res_zone and sup_zone:
-            # اگر سطح قبلی جایگزین شد
-            if symbol in self.broken_levels:
-                del self.broken_levels[symbol]
-                
-        # 🧹 قانون فراموشی (پاکسازی سطوح زامبی)
-        for sym in list(self.broken_levels.keys()):
-            mem = self.broken_levels[sym]
-            zone = mem['zone']
-            # ۱. دور شدن بیش از ۳ برابر ATR از سطح
-            if sym == symbol:
-                if mem['direction'] == 'SHORT' and (zone['low'] - price) > (atr * 3.0):
-                    logger.log_system_event(f"🧹 [{sym}] سطح شکسته‌شده فراموش شد (فاصله زیاد).")
-                    del self.broken_levels[sym]
-                elif mem['direction'] == 'LONG' and (price - zone['high']) > (atr * 3.0):
-                    logger.log_system_event(f"🧹 [{sym}] سطح شکسته‌شده فراموش شد (فاصله زیاد).")
-                    del self.broken_levels[sym]
-            
-            # ۲. گذشت بیش از ۲۴ ساعت
-            if (now - mem['break_time']).total_seconds() > 86400:
-                logger.log_system_event(f"🧹 [{sym}] سطح شکسته‌شده فراموش شد (۲۴ ساعت گذشت).")
-                del self.broken_levels[sym]
-
-            # ۳. بسته شدن کندل ۴ ساعته جدید
-            if sym == symbol and mem.get('h4_time') != h4_time:
-                logger.log_system_event(f"🧹 [{sym}] سطح شکسته‌شده فراموش شد (کندل ۴ ساعته جدید).")
-                del self.broken_levels[sym]
-
-    # ==========================================================
     #  پردازش نماد
     # ==========================================================
     async def process_symbol(self, symbol):
@@ -195,26 +145,8 @@ class StrategyManager:
 
         price = h4['price']
         trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
-        h4_time = h4['times'][-1]
-        atr = h4['atr']
 
         res_zone, sup_zone, res_c, sup_c, source = self._find_nearest_levels(h4, h1, price, trend)
-        
-        # 🧠 به‌روزرسانی حافظه سطوح
-        self._update_memory(symbol, res_zone, sup_zone, price, h4_time, atr)
-
-        # 🚑 حالت نجات: اگر سطحی پیدا نشد، از حافظه کمک بگیر
-        if not res_zone or not sup_zone:
-            if symbol in self.broken_levels:
-                mem = self.broken_levels[symbol]
-                if mem['direction'] == 'SHORT' and res_zone is None:
-                    res_zone = mem['zone']
-                    source['res'] = "MEM"
-                    logger.log_system_event(f"🧠 [{symbol}] باگ نجات: استفاده از سطح شکسته‌شده در حافظه برای Res.")
-                elif mem['direction'] == 'LONG' and sup_zone is None:
-                    sup_zone = mem['zone']
-                    source['sup'] = "MEM"
-                    logger.log_system_event(f"🧠 [{symbol}] باگ نجات: استفاده از سطح شکسته‌شده در حافظه برای Sup.")
 
         if not res_zone or not sup_zone:
             extra = ""
@@ -342,6 +274,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V61_LevelMemory'
+            'strategy': 'V60_TrendGate_1HFallback'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
