@@ -11,17 +11,21 @@ class StrategyManager:
         self.market_data = None
         self.active_setups = {}
 
-        self.LOOKBACK_CANDLES = 12       
-        self.MAX_LOOKBACK = 30           
-        self.ZONE_WIDTH_PCT = 0.0025     
+        self.LOOKBACK_CANDLES = 12
+        self.MAX_LOOKBACK = 30
+        self.ZONE_WIDTH_PCT = 0.0025
         self.DROP_FORMING_CANDLE = 'auto'
+
+        # 🔒 قفل تک‌سیگنال (جلوگیری از ارسال تکراری روی همان کندل)
+        self.last_signal_h1 = {}
+        self.last_signal_15m = {}
 
     def set_market_data_handler(self, handler):
         self.market_data = handler
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V58 Started (Fixed Level Selection)")
+        logger.log_system_event("🚀 V59 Started (Trend Gate + Correct Setup)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -43,7 +47,7 @@ class StrategyManager:
         later_bot = float('inf')
         tops = [max(O[i], C[i]) for i in range(n)]
         bots = [min(O[i], C[i]) for i in range(n)]
-        eps = price * 0.00001  
+        eps = price * 0.00001
 
         check_left_res = (trend == "UPTREND")
         check_left_sup = (trend == "DOWNTREND")
@@ -86,15 +90,14 @@ class StrategyManager:
 
             if res_zone is None and r:
                 res_c = r
-                # 🛠️ فقط همین خط تغییر کرد (از min به max)
-                body = max(x[0] for x in r) 
+                body = max(x[0] for x in r)
                 wick = max(x[1] for x in r if x[0] == body)
                 top = min(max(wick, body), body * (1 + self.ZONE_WIDTH_PCT))
                 res_zone = {'low': body, 'high': top, 'type': 'res'}
 
             if sup_zone is None and s:
                 sup_c = s
-                body = max(x[0] for x in s) 
+                body = max(x[0] for x in s)
                 wick = min(x[1] for x in s if x[0] == body)
                 bottom = max(min(wick, body), body * (1 - self.ZONE_WIDTH_PCT))
                 sup_zone = {'low': bottom, 'high': body, 'type': 'sup'}
@@ -136,36 +139,43 @@ class StrategyManager:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
 
         state = self.active_setups[symbol]
-        
-        # 🛠️ تعریف all_zones
         all_zones = [res_zone, sup_zone]
-        
+
         h1_close = h1['closes'][-1]
         h1_open = h1['opens'][-1]
         h1_high = h1['highs'][-1]
         h1_low = h1['lows'][-1]
+        h1_time = h1['times'][-1]
+        m15_time = m15['times'][-1]
 
         if state['state'] == 'IDLE':
-            # 1. چک کردن شکست سریع نزولی از مقاومت
-            if res_zone and h1_close < res_zone['low'] and h1_close < h1_open:
-                if h1['highs'][-2] >= res_zone['low']: 
+            # ⚡ Fast Rejection SHORT — فقط در DOWNTREND
+            if trend == "DOWNTREND" and res_zone and h1_close < res_zone['low'] and h1_close < h1_open:
+                if h1['highs'][-2] >= res_zone['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': res_zone, 'direction': 'SHORT'})
-                    logger.log_system_event(f"⚡ [{symbol}] Fast 1H Breakdown below Res! Waiting for 15M Retest...")
+                    logger.log_system_event(f"⚡ [{symbol}] Fast 1H Rejection at Res! Waiting for 15M Retest...")
                     return
 
-            # 2. چک کردن شکست سریع صعودی از حمایت
-            if sup_zone and h1_close > sup_zone['high'] and h1_close > h1_open:
+            # ⚡ Fast Rejection LONG — فقط در UPTREND
+            if trend == "UPTREND" and sup_zone and h1_close > sup_zone['high'] and h1_close > h1_open:
                 if h1['lows'][-2] <= sup_zone['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'zone': sup_zone, 'direction': 'LONG'})
-                    logger.log_system_event(f"⚡ [{symbol}] Fast 1H Breakout above Sup! Waiting for 15M Retest...")
+                    logger.log_system_event(f"⚡ [{symbol}] Fast 1H Rejection at Sup! Waiting for 15M Retest...")
                     return
 
-            # 3. اگر شکست سریع نبود، چک کردن برخورد معمولی (Touch)
+            # 🔔 Touch — جهت همیشه هم‌جهت روند
             for z in all_zones:
                 if z['low'] <= price <= z['high']:
-                    direction = 'SHORT' if z['type'] == 'res' else 'LONG'
+                    direction = 'SHORT' if trend == "DOWNTREND" else 'LONG'
+                    if z['type'] == 'res':
+                        setup_name = "Breakout" if direction == 'LONG' else "Rejection"
+                    else:
+                        setup_name = "Rejection" if direction == 'LONG' else "Breakdown"
                     state.update({'state': 'WAIT_1H_BREAK', 'zone': z, 'direction': direction})
-                    logger.log_system_event(f"🔔 [{symbol}] Price entered {z['type'].upper()} Zone. Waiting for 1H Confirmation...")
+                    logger.log_system_event(
+                        f"🔔 [{symbol}] Price in {z['type'].upper()} Zone "
+                        f"({setup_name} {direction}). Waiting for 1H Confirmation..."
+                    )
                     break
 
         elif state['state'] == 'WAIT_1H_BREAK':
@@ -173,20 +183,20 @@ class StrategyManager:
             if state['direction'] == 'SHORT':
                 if h1_close < z['low']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
-                    logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below Res. Waiting for 15M Retest...")
+                    logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below Zone. Waiting for 15M Retest...")
                 elif h1_high >= z['low'] and h1_close < z['low'] and h1_close < h1_open:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'SHORT'})
-                    logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Res. Waiting for 15M Retest...")
+                    logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Zone. Waiting for 15M Retest...")
                 elif h1_close > z['high'] + (h4['atr'] * 0.5):
                     state.update({'state': 'IDLE', 'zone': None})
 
             elif state['direction'] == 'LONG':
                 if h1_close > z['high']:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
-                    logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED above Sup. Waiting for 15M Retest...")
+                    logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED above Zone. Waiting for 15M Retest...")
                 elif h1_low <= z['high'] and h1_close > z['high'] and h1_close > h1_open:
                     state.update({'state': 'WAIT_15M_RETEST', 'direction': 'LONG'})
-                    logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Sup. Waiting for 15M Retest...")
+                    logger.log_system_event(f"✅ [{symbol}] 1H Rejection at Zone. Waiting for 15M Retest...")
                 elif h1_close < z['low'] - (h4['atr'] * 0.5):
                     state.update({'state': 'IDLE', 'zone': None})
 
@@ -197,16 +207,25 @@ class StrategyManager:
             m15_low = m15['lows'][-1]
             m15_open = m15['opens'][-1]
 
+            triggered = False
             if state['direction'] == 'SHORT':
                 if m15_high >= z['low'] and m15_close < z['low'] and m15_close < m15_open:
-                    logger.log_system_event(f"🏆 [{symbol}] SHORT Entry Triggered!")
-                    self.send_signal(symbol, 'SHORT', m15_close, z, h4['atr'])
-                    state.update({'state': 'IDLE', 'zone': None})
+                    triggered = True
             elif state['direction'] == 'LONG':
                 if m15_low <= z['high'] and m15_close > z['high'] and m15_close > m15_open:
-                    logger.log_system_event(f"🏆 [{symbol}] LONG Entry Triggered!")
-                    self.send_signal(symbol, 'LONG', m15_close, z, h4['atr'])
-                    state.update({'state': 'IDLE', 'zone': None})
+                    triggered = True
+
+            if triggered:
+                # 🔒 قفل تک‌سیگنال: روی همان کندل ۱ ساعته یا ۱۵ دقیقه‌ای، دوبار ارسال نکن
+                if (self.last_signal_h1.get(symbol) == h1_time or
+                        self.last_signal_15m.get(symbol) == m15_time):
+                    return
+
+                logger.log_system_event(f"🏆 [{symbol}] {state['direction']} Entry Triggered!")
+                self.send_signal(symbol, state['direction'], m15_close, z, h4['atr'])
+                self.last_signal_h1[symbol] = h1_time
+                self.last_signal_15m[symbol] = m15_time
+                state.update({'state': 'IDLE', 'zone': None})
 
     def send_signal(self, symbol, direction, entry, zone, atr):
         if not self.telegram_bot:
@@ -220,6 +239,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V58_Fixed_Levels'
+            'strategy': 'V59_TrendGate'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
