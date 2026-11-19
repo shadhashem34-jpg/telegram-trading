@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 from logger import get_trading_logger
 
 logger = get_trading_logger()
@@ -10,7 +11,7 @@ class StrategyManager:
         self.market_data = None
         self.active_setups = {}
 
-        # تنظیمات ثابت استراتژی
+        # تنظیمات ثابت استراتژی (دست‌نخورده)
         self.LOOKBACK_CANDLES = 12
         self.MAX_LOOKBACK = 30
         self.ZONE_WIDTH_PCT = 0.0025
@@ -19,7 +20,8 @@ class StrategyManager:
         self.last_signal_h1 = {}
         self.last_signal_15m = {}
 
-        # 🧠 حافظه سطوح ثبت‌شده (شکست‌خورده)
+        # 🧠 حافظه سطوح ثبت‌شده
+        # {symbol: {'zone': zone, 'type': 'SHORT'/'LONG', 'record_time': timestamp}}
         self.recorded_levels = {}
 
     def set_market_data_handler(self, handler):
@@ -27,7 +29,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        logger.log_system_event("🚀 V67 Started (Pure 4H Levels + Instant 1H Confirmation)")
+        logger.log_system_event("🚀 V70 Started (Auto Record + Fakeout handling + 12H Timer)")
 
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
@@ -41,7 +43,7 @@ class StrategyManager:
             await asyncio.sleep(180)
 
     # ==========================================================
-    #  منطق سطح‌یابی (کاملاً دست‌نخورده و اصلی - فقط ۴ ساعته)
+    #  سطح‌یابی (کاملاً دست‌نخورده و اصلی)
     # ==========================================================
     def _collect_candidates(self, o, h, l, c, price, lookback, trend):
         O, H, L, C = o[-lookback:], h[-lookback:], l[-lookback:], c[-lookback:]
@@ -112,19 +114,37 @@ class StrategyManager:
         return res_zone, sup_zone, res_c, sup_c
 
     def _find_nearest_levels(self, h4, price, trend):
-        # فقط ۴ ساعته
         return self._levels_from_candles(h4, price, trend, self.DROP_FORMING_CANDLE)
 
     # ==========================================================
-    #  ثبت آنی شکست
+    #  ثبت آنی شکست + مدیریت زمان
     # ==========================================================
-    def _register_breaks(self, symbol, res_zone, sup_zone, price):
+    def _register_and_manage(self, symbol, res_zone, sup_zone, price):
+        now = datetime.now(timezone.utc)
+
+        # ۱. ثبت آنی شکست
         if res_zone and price > res_zone['high']:
-            self.recorded_levels[symbol] = {'zone': res_zone, 'type': 'LONG'}
-            logger.log_system_event(f"🧠 [{symbol}] Breakout recorded above {res_zone['high']:.2f}")
+            if symbol not in self.recorded_levels or self.recorded_levels[symbol]['zone'] != res_zone:
+                self.recorded_levels[symbol] = {
+                    'zone': res_zone, 'type': 'LONG', 'record_time': now
+                }
+                logger.log_system_event(f"🧠 [{symbol}] Breakout recorded above {res_zone['high']:.2f}")
+                
         elif sup_zone and price < sup_zone['low']:
-            self.recorded_levels[symbol] = {'zone': sup_zone, 'type': 'SHORT'}
-            logger.log_system_event(f"🧠 [{symbol}] Breakdown recorded below {sup_zone['low']:.2f}")
+            if symbol not in self.recorded_levels or self.recorded_levels[symbol]['zone'] != sup_zone:
+                self.recorded_levels[symbol] = {
+                    'zone': sup_zone, 'type': 'SHORT', 'record_time': now
+                }
+                logger.log_system_event(f"🧠 [{symbol}] Breakdown recorded below {sup_zone['low']:.2f}")
+
+        # ۲. قانون فراموشی (بعد از ۱۲ ساعت)
+        for sym in list(self.recorded_levels.keys()):
+            mem = self.recorded_levels[sym]
+            if sym == symbol:
+                time_passed = (now - mem['record_time']).total_seconds()
+                if time_passed > (12 * 3600):
+                    logger.log_system_event(f"🧹 [{sym}] سطح ثبت‌شده فراموش شد (گذشت ۱۲ ساعت).")
+                    del self.recorded_levels[sym]
 
     async def process_symbol(self, symbol):
         h4 = await self.market_data.get_tf_data(symbol, "240")
@@ -132,7 +152,6 @@ class StrategyManager:
         m15 = await self.market_data.get_tf_data(symbol, "15")
 
         if not all([h4, h1, m15]):
-            logger.log_system_event(f"❌ {symbol}: داده‌ی تایم‌فریم ناقص است")
             return
 
         price = h4['price']
@@ -141,18 +160,27 @@ class StrategyManager:
         # ۱. پیدا کردن سطوح ۴ ساعته
         res_zone, sup_zone, res_c, sup_c = self._find_nearest_levels(h4, price, trend)
         
-        # ۲. ثبت آنی شکست‌ها
-        self._register_breaks(symbol, res_zone, sup_zone, price)
+        # ۲. ثبت آنی و مدیریت حافظه
+        self._register_and_manage(symbol, res_zone, sup_zone, price)
 
+        # ۳. اگر سطح جدیدی نیست ولی سطح ثبت‌شده داریم، ادامه بده
         if not res_zone or not sup_zone:
-            logger.log_system_event(f"⚠️ {symbol}: level not found (res={bool(res_zone)}, sup={bool(sup_zone)}) | price={price:.4f}")
-            return
+            if symbol not in self.recorded_levels:
+                logger.log_system_event(f"⚠️ {symbol}: level not found (res={bool(res_zone)}, sup={bool(sup_zone)}) | price={price:.4f}")
+                return
+            else:
+                mem = self.recorded_levels[symbol]
+                if mem['type'] == 'SHORT':
+                    sup_zone = mem['zone']
+                elif mem['type'] == 'LONG':
+                    res_zone = mem['zone']
 
-        # 📊 لاگ سطوح
-        log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
-        log_msg += (f"   ↳ Res Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f}\n")
-        log_msg += (f"   ↳ Sup Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f}\n")
-        logger.log_system_event(log_msg)
+        # 📊 لاگ سطوح (در صورت وجود)
+        if res_zone and sup_zone:
+            log_msg = f"📊 {symbol} — 4H: {trend} | Price: {price:.2f}\n"
+            log_msg += (f"   ↳ Res Zone: {res_zone['low']:.2f} - {res_zone['high']:.2f}\n")
+            log_msg += (f"   ↳ Sup Zone: {sup_zone['low']:.2f} - {sup_zone['high']:.2f}\n")
+            logger.log_system_event(log_msg)
 
         if symbol not in self.active_setups:
             self.active_setups[symbol] = {'state': 'IDLE', 'zone': None, 'direction': None}
@@ -166,38 +194,53 @@ class StrategyManager:
         h1_time = h1['times'][-1]
         m15_time = m15['times'][-1]
 
-        # اگر در حافظه سطح ثبت‌شده داریم و ربات در حالت IDLE است
+        # ۴. اگر سطح ثبت‌شده داریم، می‌ریم سراغ تاییدیه ۱ ساعته
         if state['state'] == 'IDLE' and symbol in self.recorded_levels:
             mem = self.recorded_levels[symbol]
             z = mem['zone']
             
-            # گیت روند: جهت فقط از ۴ ساعته
             if mem['type'] == 'SHORT' and trend == "DOWNTREND":
                 state.update({'state': 'WAIT_1H_BREAK', 'zone': z, 'direction': 'SHORT'})
-                logger.log_system_event(f"🔔 [{symbol}] Waiting for 1H close below {z['low']:.2f}...")
+                logger.log_system_event(f"🔔 [{symbol}] Breakdown recorded. Waiting for 1H close below {z['low']:.2f}...")
             elif mem['type'] == 'LONG' and trend == "UPTREND":
                 state.update({'state': 'WAIT_1H_BREAK', 'zone': z, 'direction': 'LONG'})
-                logger.log_system_event(f"🔔 [{symbol}] Waiting for 1H close above {z['high']:.2f}...")
+                logger.log_system_event(f"🔔 [{symbol}] Breakout recorded. Waiting for 1H close above {z['high']:.2f}...")
 
-        # منتظر تایید کندل ۱ ساعته
+        # ۵. منتظر تایید کندل ۱ ساعته
         elif state['state'] == 'WAIT_1H_BREAK':
             z = state['zone']
             if state['direction'] == 'SHORT':
                 if h1_close < z['low']: 
                     state.update({'state': 'WAIT_15M_RETEST'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED below level. Waiting for 15M Retest...")
+                elif h1_close > z['high']: # فیک بریک
+                    state.update({'state': 'IDLE', 'zone': None})
+                    logger.log_system_event(f"🔄 [{symbol}] Fakeout! Price returned above level. Reverting to IDLE.")
             elif state['direction'] == 'LONG':
                 if h1_close > z['high']: 
                     state.update({'state': 'WAIT_15M_RETEST'})
                     logger.log_system_event(f"✅ [{symbol}] 1H Body CLOSED above level. Waiting for 15M Retest...")
+                elif h1_close < z['low']: # فیک بریک
+                    state.update({'state': 'IDLE', 'zone': None})
+                    logger.log_system_event(f"🔄 [{symbol}] Fakeout! Price returned below level. Reverting to IDLE.")
 
-        # منتظر پولبک ۱۵ دقیقه
+        # ۶. منتظر پولبک ۱۵ دقیقه (با بررسی فیک بریک)
         elif state['state'] == 'WAIT_15M_RETEST':
             z = state['zone']
             m15_close = m15['closes'][-1]
             m15_high = m15['highs'][-1]
             m15_low = m15['lows'][-1]
             m15_open = m15['opens'][-1]
+
+            # اگر قیمت برگشت و سطح رو فیک بریک کرد
+            if state['direction'] == 'SHORT' and h1_close > z['high']:
+                state.update({'state': 'IDLE', 'zone': None})
+                logger.log_system_event(f"🔄 [{symbol}] Fakeout in 15M wait! Reverting to IDLE.")
+                return
+            elif state['direction'] == 'LONG' and h1_close < z['low']:
+                state.update({'state': 'IDLE', 'zone': None})
+                logger.log_system_event(f"🔄 [{symbol}] Fakeout in 15M wait! Reverting to IDLE.")
+                return
 
             triggered = False
             if state['direction'] == 'SHORT':
@@ -225,6 +268,7 @@ class StrategyManager:
         if not self.telegram_bot:
             return
             
+        # استاپ‌لاس بر اساس سایه کندل ۱۵ دقیقه‌ای (همون قانون خودت)
         if direction == 'SHORT':
             sl = max(zone['high'], m15_high)
         else:
@@ -238,6 +282,6 @@ class StrategyManager:
         signal = {
             'symbol': symbol, 'type': direction, 'entry_price': entry,
             'stop_loss': sl, 'take_profit_1': tp, 'take_profit_2': 0,
-            'strategy': 'V67_Instant_Record'
+            'strategy': 'V70_Final'
         }
         asyncio.create_task(self.telegram_bot.send_signal(signal))
