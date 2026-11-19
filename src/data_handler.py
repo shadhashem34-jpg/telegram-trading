@@ -14,8 +14,8 @@ class MarketDataHandler:
         self._next_fetch = {}
         self.EMA_PERIOD = 200
         self.ATR_PERIOD = 14
-        # تعداد کندل درخواستی: برای ۴ ساعته ۱۰۰۰ تا تا EMA 200 درست هموار بشه
-        self.LIMITS = {"240": 1000}
+        # تعداد کندل درخواستی: ۴ ساعته ۱۰۰۰ کندل و روزانه ۱۸۰ کندل (۶ ماه)
+        self.LIMITS = {"240": 1000, "D": 180}
         self.DEFAULT_LIMIT = 200
 
     async def start_data_collection(self):
@@ -35,7 +35,6 @@ class MarketDataHandler:
 
     @staticmethod
     def _calculate_atr(highs, lows, closes, period=14):
-        """ATR استاندارد (Wilder's Smoothing)"""
         if len(closes) < period + 1:
             return 0.0
         trs = [
@@ -52,16 +51,20 @@ class MarketDataHandler:
             self.session.get_kline, category="linear", symbol=symbol, interval=interval, limit=limit
         )
         if resp.get('retCode', 0) != 0:
-            logger.log_system_event(f"Bybit error for {symbol} ({interval}m): {resp.get('retMsg')}")
+            logger.log_system_event(f"Bybit error for {symbol} ({interval}): {resp.get('retMsg')}")
             return None
 
         rows = resp['result']['list']
         if not rows:
             return None
 
-        # فقط کندل‌های بسته‌شده
+        # 🛠️ اصلاح محاسبه زمان برای تایم‌فریم روزانه ("D")
+        if interval == "D":
+            interval_ms = 24 * 60 * 60 * 1000
+        else:
+            interval_ms = int(interval) * 60 * 1000
+
         now_ms = int(time.time() * 1000)
-        interval_ms = int(interval) * 60 * 1000
         rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]
         rows.sort(key=lambda r: int(r[0]))
         if not rows:
@@ -94,7 +97,6 @@ class MarketDataHandler:
             return None
 
     async def get_tf_data(self, symbol, interval):
-        """دیتای یک تایم‌فریم با کش. قیمت لحظه‌ای همیشه تازه گرفته می‌شود."""
         cache_key = f"{symbol}_{interval}"
 
         if time.time() < self._next_fetch.get(cache_key, 0):
@@ -107,10 +109,14 @@ class MarketDataHandler:
         candles = await self._fetch_candles(symbol, interval, limit)
         if candles:
             self._cache[cache_key] = candles
-            interval_ms = int(interval) * 60 * 1000
-            # کندل بعدی وقتی بسته می‌شه که آخرین کندل بسته‌شده + ۲ بازه بگذره
+            
+            # 🛠️ اصلاح محاسبه زمان برای تایم‌فریم روزانه ("D")
+            if interval == "D":
+                interval_ms = 24 * 60 * 60 * 1000
+            else:
+                interval_ms = int(interval) * 60 * 1000
+                
             next_close = (candles['times'][-1] + 2 * interval_ms) / 1000
             self._next_fetch[cache_key] = next_close + 15
             candles['price'] = await self._fetch_price(symbol) or candles['close']
             return candles
-        return None
