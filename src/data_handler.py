@@ -12,15 +12,27 @@ class MarketDataHandler:
         self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         self._cache = {}
         self._next_fetch = {}
+        self._price_cache = {}   # symbol -> (زمان, قیمت)
         self.EMA_PERIOD = 200
         self.ATR_PERIOD = 14
-        # تعداد کندل درخواستی: ۴ ساعته ۱۰۰۰ کندل و روزانه ۱۸۰ کندل (۶ ماه)
-        self.LIMITS = {"240": 1000, "D": 180}
+        # تعداد کندل درخواستی: ۴ ساعته ۱۰۰۰، روزانه ۱۸۰ (۶ ماه)، هفتگی ۶۰ (حدود ۱.۱ سال)
+        self.LIMITS = {"240": 1000, "D": 180, "W": 60}
         self.DEFAULT_LIMIT = 200
+        self.PRICE_TTL_SEC = 5   # قیمت زنده را در هر اسکن فقط یک بار بگیر (جلوگیری از rate limit)
 
     async def start_data_collection(self):
         while True:
             await asyncio.sleep(60)
+
+    @staticmethod
+    def _interval_ms(interval):
+        if interval == "D":
+            return 24 * 60 * 60 * 1000
+        if interval == "W":
+            return 7 * 24 * 60 * 60 * 1000
+        if interval == "M":
+            return 30 * 24 * 60 * 60 * 1000
+        return int(interval) * 60 * 1000
 
     @staticmethod
     def _calculate_ema(prices, period):
@@ -58,14 +70,9 @@ class MarketDataHandler:
         if not rows:
             return None
 
-        # 🛠️ اصلاح محاسبه زمان برای تایم‌فریم روزانه ("D")
-        if interval == "D":
-            interval_ms = 24 * 60 * 60 * 1000
-        else:
-            interval_ms = int(interval) * 60 * 1000
-
+        interval_ms = self._interval_ms(interval)
         now_ms = int(time.time() * 1000)
-        rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]
+        rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]   # فقط کندل‌های بسته‌شده
         rows.sort(key=lambda r: int(r[0]))
         if not rows:
             return None
@@ -80,43 +87,54 @@ class MarketDataHandler:
 
         return {
             'times': [int(r[0]) for r in rows],
+            'ms': interval_ms,
             'opens': opens, 'highs': highs, 'lows': lows, 'closes': closes,
             'close': closes[-1],
             'ema_200': ema_200,
             'atr': atr, 'count': len(rows),
         }
 
-    async def _fetch_price(self, symbol):
+    async def _get_price(self, symbol):
+        """قیمت زنده با کش ۵ ثانیه‌ای؛ در خطا None."""
+        now = time.time()
+        cached = self._price_cache.get(symbol)
+        if cached and now - cached[0] < self.PRICE_TTL_SEC:
+            return cached[1]
         try:
             resp = await asyncio.to_thread(self.session.get_tickers, category="linear", symbol=symbol)
             if resp.get('retCode', 0) != 0:
-                return None
+                return cached[1] if cached else None
             lst = resp['result']['list']
-            return float(lst[0]['lastPrice']) if lst else None
-        except Exception:
-            return None
+            price = float(lst[0]['lastPrice']) if lst else None
+            if price:
+                self._price_cache[symbol] = (now, price)
+            return price
+        except Exception as e:
+            logger.log_system_event(f"Ticker error for {symbol}: {e}")
+            return cached[1] if cached else None
 
     async def get_tf_data(self, symbol, interval):
-        cache_key = f"{symbol}_{interval}"
+        key = f"{symbol}_{interval}"
+        cached = self._cache.get(key)
 
-        if time.time() < self._next_fetch.get(cache_key, 0):
-            cached = self._cache.get(cache_key)
-            if cached:
-                cached['price'] = await self._fetch_price(symbol) or cached['close']
-                return cached
+        if cached is None or time.time() >= self._next_fetch.get(key, 0):
+            try:
+                candles = await self._fetch_candles(symbol, interval, self.LIMITS.get(interval, self.DEFAULT_LIMIT))
+            except Exception as e:
+                logger.log_system_event(f"Error fetching {symbol} {interval}: {e}")
+                candles = None
 
-        limit = self.LIMITS.get(interval, self.DEFAULT_LIMIT)
-        candles = await self._fetch_candles(symbol, interval, limit)
-        if candles:
-            self._cache[cache_key] = candles
-            
-            # 🛠️ اصلاح محاسبه زمان برای تایم‌فریم روزانه ("D")
-            if interval == "D":
-                interval_ms = 24 * 60 * 60 * 1000
+            if candles:
+                self._cache[key] = candles
+                cached = candles
+                next_close = (candles['times'][-1] + 2 * candles['ms']) / 1000
+                self._next_fetch[key] = next_close + 15
             else:
-                interval_ms = int(interval) * 60 * 1000
-                
-            next_close = (candles['times'][-1] + 2 * interval_ms) / 1000
-            self._next_fetch[cache_key] = next_close + 15
-            candles['price'] = await self._fetch_price(symbol) or candles['close']
-            return candles
+                # خطا: با دیتای قبلی (اگر هست) ادامه بده و ۶۰ ثانیه بعد دوباره تلاش کن
+                self._next_fetch[key] = time.time() + 60
+
+        if not cached:
+            return None
+
+        cached['price'] = await self._get_price(symbol) or cached['close']
+        return cached
