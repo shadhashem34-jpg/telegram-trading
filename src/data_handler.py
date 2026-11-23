@@ -12,13 +12,12 @@ class MarketDataHandler:
         self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
         self._cache = {}
         self._next_fetch = {}
-        self._price_cache = {}   # symbol -> (زمان, قیمت)
+        self._price_cache = {}
         self.EMA_PERIOD = 200
         self.ATR_PERIOD = 14
-        # تعداد کندل درخواستی: ۴ ساعته ۱۰۰۰، روزانه ۱۸۰ (۶ ماه)، هفتگی ۶۰ (حدود ۱.۱ سال)
-        self.LIMITS = {"240": 1000, "D": 180, "W": 60}
+        self.LIMITS = {"240": 1000, "60": 300, "15": 300, "D": 180, "W": 60}
         self.DEFAULT_LIMIT = 200
-        self.PRICE_TTL_SEC = 5   # قیمت زنده را در هر اسکن فقط یک بار بگیر (جلوگیری از rate limit)
+        self.PRICE_TTL_SEC = 5
 
     async def start_data_collection(self):
         while True:
@@ -39,7 +38,7 @@ class MarketDataHandler:
         if not prices:
             return 0.0
         used = min(period, len(prices))
-        multiplier = 2 / (used + 1)
+        multiplier = 2 / (period + 1)
         ema = sum(prices[:used]) / used
         for price in prices[used:]:
             ema = (price - ema) * multiplier + ema
@@ -49,10 +48,8 @@ class MarketDataHandler:
     def _calculate_atr(highs, lows, closes, period=14):
         if len(closes) < period + 1:
             return 0.0
-        trs = [
-            max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
-            for i in range(1, len(closes))
-        ]
+        trs = [max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]),
+                   abs(lows[i] - closes[i - 1])) for i in range(1, len(closes))]
         atr = sum(trs[:period]) / period
         for i in range(period, len(trs)):
             atr = ((atr * (period - 1)) + trs[i]) / period
@@ -60,53 +57,50 @@ class MarketDataHandler:
 
     async def _fetch_candles(self, symbol, interval="240", limit=100):
         resp = await asyncio.to_thread(
-            self.session.get_kline, category="linear", symbol=symbol, interval=interval, limit=limit
+            self.session.get_kline, category="linear", symbol=symbol,
+            interval=interval, limit=limit
         )
         if resp.get('retCode', 0) != 0:
-            logger.log_system_event(f"Bybit error for {symbol} ({interval}): {resp.get('retMsg')}")
+            logger.log_system_event(
+                f"Bybit error for {symbol} ({interval}): {resp.get('retMsg')}"
+            )
             return None
-
-        rows = resp['result']['list']
+        rows = resp.get('result', {}).get('list', [])
         if not rows:
             return None
-
         interval_ms = self._interval_ms(interval)
         now_ms = int(time.time() * 1000)
-        rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]   # فقط کندل‌های بسته‌شده
+        rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]
         rows.sort(key=lambda r: int(r[0]))
         if not rows:
             return None
-
         closes = [float(r[4]) for r in rows]
         highs = [float(r[2]) for r in rows]
         lows = [float(r[3]) for r in rows]
         opens = [float(r[1]) for r in rows]
-
         ema_200 = self._calculate_ema(closes, self.EMA_PERIOD) if interval == "240" else 0.0
         atr = self._calculate_atr(highs, lows, closes, self.ATR_PERIOD)
-
         return {
-            'times': [int(r[0]) for r in rows],
-            'ms': interval_ms,
+            'times': [int(r[0]) for r in rows], 'ms': interval_ms,
             'opens': opens, 'highs': highs, 'lows': lows, 'closes': closes,
-            'close': closes[-1],
-            'ema_200': ema_200,
-            'atr': atr, 'count': len(rows),
+            'close': closes[-1], 'ema_200': ema_200, 'atr': atr,
+            'count': len(rows),
         }
 
     async def _get_price(self, symbol):
-        """قیمت زنده با کش ۵ ثانیه‌ای؛ در خطا None."""
         now = time.time()
         cached = self._price_cache.get(symbol)
         if cached and now - cached[0] < self.PRICE_TTL_SEC:
             return cached[1]
         try:
-            resp = await asyncio.to_thread(self.session.get_tickers, category="linear", symbol=symbol)
+            resp = await asyncio.to_thread(
+                self.session.get_tickers, category="linear", symbol=symbol
+            )
             if resp.get('retCode', 0) != 0:
                 return cached[1] if cached else None
-            lst = resp['result']['list']
+            lst = resp.get('result', {}).get('list', [])
             price = float(lst[0]['lastPrice']) if lst else None
-            if price:
+            if price and price > 0:
                 self._price_cache[symbol] = (now, price)
             return price
         except Exception as e:
@@ -116,25 +110,23 @@ class MarketDataHandler:
     async def get_tf_data(self, symbol, interval):
         key = f"{symbol}_{interval}"
         cached = self._cache.get(key)
-
         if cached is None or time.time() >= self._next_fetch.get(key, 0):
             try:
-                candles = await self._fetch_candles(symbol, interval, self.LIMITS.get(interval, self.DEFAULT_LIMIT))
+                candles = await self._fetch_candles(
+                    symbol, interval, self.LIMITS.get(interval, self.DEFAULT_LIMIT)
+                )
             except Exception as e:
                 logger.log_system_event(f"Error fetching {symbol} {interval}: {e}")
                 candles = None
-
             if candles:
                 self._cache[key] = candles
                 cached = candles
+                # Ø¢Ø®Ø±ÛÙ Ú©ÙØ¯Ù Ø¨Ø³ØªÙâØ´Ø¯Ù Ø¯Ø± Ø²ÙØ§Ù open+interval Ø¨Ø³ØªÙ Ø´Ø¯ÙØ Ø¯Ø± ÙÙØ§Ù ÙØ­Ø¸Ù Ø¯ÙØ¨Ø§Ø±Ù Ø¯Ø±ÛØ§ÙØª Ú©Ù.
                 next_close = (candles['times'][-1] + 2 * candles['ms']) / 1000
-                self._next_fetch[key] = next_close + 15
+                self._next_fetch[key] = next_close + 2
             else:
-                # خطا: با دیتای قبلی (اگر هست) ادامه بده و ۶۰ ثانیه بعد دوباره تلاش کن
-                self._next_fetch[key] = time.time() + 60
-
+                self._next_fetch[key] = time.time() + 30
         if not cached:
             return None
-
         cached['price'] = await self._get_price(symbol) or cached['close']
         return cached
