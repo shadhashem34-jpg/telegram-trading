@@ -5,7 +5,7 @@ from logger import get_trading_logger
 
 try:
     from levels import LEVELS, LEVELS_UPDATED
-except Exception as _e:          # فایل levels.py نیست یا خراب است
+except Exception as _e:
     LEVELS, LEVELS_UPDATED = {}, None
     _LEVELS_ERROR = repr(_e)
 else:
@@ -13,7 +13,7 @@ else:
 
 logger = get_trading_logger()
 
-TAG = "V80"
+TAG = "V81"
 
 
 def _log(msg):
@@ -35,7 +35,6 @@ def _ts(ms):
 
 
 def _tail_candles(tf, now_ms, tail=40):
-    """کندل‌های بسته‌شده: (open_ms, close_ms, o, h, l, c) — فقط tail تای آخر."""
     ms = tf.get('ms') or 60_000
     n = len(tf['times'])
     out = []
@@ -52,41 +51,36 @@ class StrategyManager:
         self.telegram_bot = telegram_bot
         self.market_data = None
 
-        # ================= سطوح دستی =================
-        self.SINGLE_LEVEL_HALF_WIDTH_PCT = 0.125   # اگر فقط یک عدد دادی: ±این‌قدر درصد
-        self.STALE_LEVELS_HOURS = 36               # سطوح قدیمی‌تر از این: هشدار در لاگ
-        self.WARN_EVERY_MIN = 60                   # هر هشدار هر X دقیقه یک بار
+        self.SINGLE_LEVEL_HALF_WIDTH_PCT = 0.125
+        self.STALE_LEVELS_HOURS = 36
+        self.WARN_EVERY_MIN = 60
 
-        # ================= رویداد (لمس/شکست) =================
-        self.APPROACH_FILTER = True         # False = فیلتر «قیمت از دور آمده باشد» کاملاً خاموش
-        self.APPROACH_LOOKBACK_H1 = 8       # قیمت باید در این‌قدر کندل ۱ساعته‌ی قبل ...
-        self.APPROACH_CLEAR_H1 = 5          # ... و در ۵ کندل آخرشان اصلاً به سطح نخورده باشد
-        self.APPROACH_MIN_DIST_ATR1H = 1.0  # ... و حداقل این‌قدر ATR(1H) از سطح دور شده باشد
-        self.SKIP_BLOCK_H = 1               # لمس بی‌اعتبار: همان سطح این‌قدر ساعت دوباره بررسی نشود
-        self.LOG_ONLY_COOLDOWN_H = 2        # لاگ لمس سطوح غیرفعال: هر سطح هر X ساعت یک بار
+        self.APPROACH_FILTER = True
+        self.APPROACH_LOOKBACK_H1 = 8
+        self.APPROACH_CLEAR_H1 = 5
+        self.APPROACH_MIN_DIST_ATR1H = 1.0
+        self.SKIP_BLOCK_H = 1
+        self.LOG_ONLY_COOLDOWN_H = 2
 
-        # ================= ستاپ =================
-        self.MAX_SETUPS = 2                 # هر طرف (مقاومت/حمایت) یک ستاپ
-        self.RETEST_EXPIRE_H = 12           # مهلت پولبک بعد از «شکست» سطح (ساعت)
-        self.REJECT_EXPIRE_H = 8            # مهلت سیگنال بعد از «رد شدن» از سطح (ساعت)
-        self.ZONE_COOLDOWN_H = 3            # بعد از سیگنال/انقضا همان زون تا این‌قدر فعال نشود
-        self.SIGNAL_COOLDOWN_MIN = 30       # فاصله‌ی حداقل بین دو سیگنال یک نماد
-        self.MAX_DRIFT_ATR15 = 1.5          # اگر قیمت زنده بیشتر از این‌قدر ATR(15m) از ورود دور شد، رد شود
+        self.MAX_SETUPS = 2
+        self.RETEST_EXPIRE_H = 12
+        self.REJECT_EXPIRE_H = 8
+        self.ZONE_COOLDOWN_H = 3
+        self.SIGNAL_COOLDOWN_MIN = 30
+        self.MAX_DRIFT_ATR15 = 1.5
 
-        # ================= حد ضرر / هدف =================
-        self.SL_ATR15_BUFFER = 0.5          # SL = سایه‌ی کندل یا لبه‌ی دور زون (هرکدام دورتر) ± این‌قدر ATR(15m)
-        self.MIN_RISK_ATR1H = 0.75          # حداقل ریسک (برحسب ATR ۱ساعته)
-        self.MAX_RISK_ATR1H = 4.0           # بیشتر از این ریسک → سیگنال نمی‌دهد (زون‌های دستی پهن‌اند، پس بالاتر از V74)
-        self.RR = 1.5                       # TP1 = این‌قدر برابر ریسک
-        self.MIN_ROOM_R = 0                 # فیلتر فضا (خاموش): اگر سطح مخالف نزدیک‌تر از این‌قدر برابر ریسک بود، سیگنال نده
+        self.SL_ATR15_BUFFER = 0.5
+        self.MIN_RISK_ATR1H = 0.75
+        self.MAX_RISK_ATR1H = 4.0
+        self.RR = 1.5
+        self.MIN_ROOM_R = 0
 
-        # ================= ردیابی نتیجه =================
         self.TRACK_MAX_H = 48
 
-        self.setups = {}                   # symbol -> لیست ستاپ‌ها
-        self.active_setups = self.setups   # نام قدیمی (سازگاری)
-        self.prev_scan = {}                # symbol -> {'levels','price','ms'}
-        self.blocked = {}                  # symbol -> [(low, high, until_ms)]
+        self.setups = {}
+        self.active_setups = self.setups
+        self.prev_scan = {}
+        self.blocked = {}
         self.log_only_until = {}
         self.warn_until = {}
         self.last_signal_ms = {}
@@ -108,7 +102,8 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        _log(f"🚀 {TAG} Started (Manual Levels > Touch/Break > 1H > 15M Pullback)")
+        _log(f"🚀 {TAG} Started (Inside-Zone Event Detection)")
+
         symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
 
         while self.running:
@@ -124,9 +119,6 @@ class StrategyManager:
         self.running = False
         _log("StrategyManager stopped")
 
-    # ==========================================================
-    # سطوح دستی
-    # ==========================================================
     def _get_levels(self, symbol):
         out = []
         for item in LEVELS.get(symbol, []):
@@ -147,8 +139,6 @@ class StrategyManager:
 
     @staticmethod
     def _pick_active(book, price):
-        """نزدیک‌ترین زون بالای قیمت (مقاومت) و نزدیک‌ترین زیر قیمت (حمایت). نقش‌ها از موقعیت نسبت به قیمت می‌آید،
-        پس بعد از شکست، سطح شکسته خودکار حمایت/مقاومت جدید می‌شود و سطح بعدی جایش را می‌گیرد."""
         for b in book:
             if b['mid'] > price:
                 b['role'], b['dist'] = 'RES', max(0.0, b['low'] - price)
@@ -178,13 +168,10 @@ class StrategyManager:
             try:
                 age_h = (now_ms / 1000 - datetime.strptime(LEVELS_UPDATED, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()) / 3600
                 if age_h > self.STALE_LEVELS_HOURS:
-                    self._warn(symbol, 'stale', f"سطوح {age_h:.0f} ساعت پیش به‌روز شده‌اند (LEVELS_UPDATED={LEVELS_UPDATED}). لطفاً به‌روز کن", now_ms)
+                    self._warn(symbol, 'stale', f"سطوح {age_h:.0f} ساعت پیش به‌روز شده‌اند. لطفاً به‌روز کن", now_ms)
             except Exception:
                 pass
 
-    # ==========================================================
-    # رویدادها: لمس / شکست
-    # ==========================================================
     def _is_blocked(self, symbol, z, now_ms):
         lst = [b for b in self.blocked.get(symbol, []) if b[2] > now_ms]
         self.blocked[symbol] = lst
@@ -196,7 +183,6 @@ class StrategyManager:
         self.blocked.setdefault(symbol, []).append((z['low'], z['high'], now_ms + h * 3_600_000))
 
     def _detect_events(self, symbol, prev, m15c, price, now_ms):
-        """هر سطحی از اسکن قبلی که تا الان لمس/رد شده (قبلش از سمت درست آمده بوده)."""
         pp = prev['price']
         candles = [c for c in m15c if c[1] > prev['ms']]
         active = self.setups.get(symbol, [])
@@ -207,12 +193,18 @@ class StrategyManager:
             tol = lv['high'] * 0.001
             if any(not (lv['high'] < s['zone']['low'] - tol or lv['low'] > s['zone']['high'] + tol) for s in active):
                 continue
+            
+            # 🛠️ تغییر اصلی: تشخیص قیمت داخل زون
             if pp < lv['low']:
                 role = 'RES'
             elif pp > lv['high']:
                 role = 'SUP'
+            elif lv['low'] <= pp <= lv['high']:
+                # قیمت داخل زون است؛ نقش را بر اساس اینکه به کدام سمت نزدیک‌تر است تعیین می‌کنیم (یا به عنوان RES/SUP گذر موقت)
+                role = 'RES' if (price > lv['mid']) else 'SUP' # اینجا فرض می‌کنیم اگر بالاتر از وسط است، شاید مقاومت باشد
             else:
                 continue
+
             ev = None
             for (t, cm, o, h, l, c) in candles:
                 if (role == 'RES' and h >= lv['low']) or (role == 'SUP' and l <= lv['high']):
@@ -226,7 +218,6 @@ class StrategyManager:
         return found
 
     def _fresh_approach(self, lv, role, h1c, atr1h, ev_ms, price):
-        """لمس معتبر = قیمت از دور آمده؛ نه اینکه ساعت‌ها کنار سطح چرخیده باشد."""
         if not self.APPROACH_FILTER:
             return True, "فیلتر خاموش است"
         prior = [c for c in h1c if c[1] <= ev_ms][-self.APPROACH_LOOKBACK_H1:]
@@ -248,20 +239,15 @@ class StrategyManager:
 
     @staticmethod
     def _beyond(role, z, close):
-        """کلوز ۱ساعته بیرون زون (بدنه رد شده)؟"""
         return (role == 'RES' and close > z['high']) or (role == 'SUP' and close < z['low'])
 
     @staticmethod
     def _zs(z):
         return f"{_fmt(z['low'])}–{_fmt(z['high'])}"
 
-    # ==========================================================
-    # ماشین حالت: WAIT_1H  ->  ARMED  ->  سیگنال
-    # ==========================================================
     def _advance(self, symbol, st, trend, price, h1c, m15c, atr15, atr1h, book, now_ms):
         z = st['zone']
 
-        # ---- تایید ۱ساعته: شکست با بدنه یا فقط لمس با سایه؟ ----
         if st['state'] == 'WAIT_1H':
             after = [c for c in h1c if c[1] > st['event_ms']]
             if not after:
@@ -275,13 +261,11 @@ class StrategyManager:
                      f"به {'مقاومت' if st['role'] == 'RES' else 'حمایت'} تبدیل شد | منتظر پولبک ۱۵دقیقه تا {self.RETEST_EXPIRE_H} ساعت")
             else:
                 st.update(state='ARMED', kind='REJECT', since_ms=st['event_ms'], checked_ms=st['event_ms'])
-                _log(f"↩️ [{symbol}] ۱ساعته: نشکست، فقط لمس با سایه (کلوز ۱ساعته بیرون زون {self._zs(z)} نرفت) | "
-                     f"منتظر کندل ۱۵دقیقه‌ی رد شدن تا {self.REJECT_EXPIRE_H} ساعت")
+                _log(f"↩️ [{symbol}] ۱ساعته: نشکست، فقط لمس با سایه | منتظر کندل ۱۵دقیقه‌ی رد شدن تا {self.REJECT_EXPIRE_H} ساعت")
 
         if st['state'] != 'ARMED':
             return None
 
-        # ---- شکست بعدی ۱ساعته علیه ستاپ: نقش زون عوض می‌شود ----
         for c in h1c:
             if c[1] > st['since_ms'] and self._beyond(st['role'], z, c[5]):
                 old = st['role']
@@ -289,7 +273,6 @@ class StrategyManager:
                 st.update(kind='RETEST', since_ms=c[1], checked_ms=c[1])
                 _log(f"💥 [{symbol}] شکست ۱ساعته ({_fmt(c[5])}) | زون {self._zs(z)}: {old}→{st['role']} | منتظر پولبک")
 
-        # ---- انقضا ----
         hours = self.RETEST_EXPIRE_H if st['kind'] == 'RETEST' else self.REJECT_EXPIRE_H
         if now_ms - st['since_ms'] > hours * 3_600_000:
             _log(f"⌛ [{symbol}] ستاپ {st['kind']} روی زون {self._zs(z)} بدون سیگنال منقضی شد")
@@ -297,7 +280,6 @@ class StrategyManager:
             st['state'] = 'DEAD'
             return None
 
-        # ---- تریگر ۱۵دقیقه (پولبک): سایه وارد زون شود + کلوز بیرون زون + جهت کندل ----
         trig = None
         last_cm = st['checked_ms']
         for c in m15c:
@@ -349,9 +331,6 @@ class StrategyManager:
         st['state'] = 'DEAD'
         return True
 
-    # ==========================================================
-    # حد ضرر / هدف
-    # ==========================================================
     def _build_trade(self, symbol, direction, entry, z, trig, atr15, atr1h, book):
         buf = self.SL_ATR15_BUFFER * atr15
         if direction == 'SHORT':
@@ -372,7 +351,6 @@ class StrategyManager:
         if risk <= 0:
             return None
 
-        # سطح مخالف بعدی (TP2 و فضای حرکت)
         if direction == 'SHORT':
             opp = [b for b in book if b['high'] < entry - 1e-9 and b['mid'] < z['low']]
             nxt = max(opp, key=lambda b: b['high'])['high'] if opp else None
@@ -426,9 +404,6 @@ class StrategyManager:
         else:
             _log("✅ سیگنال به تلگرام فرستاده شد")
 
-    # ==========================================================
-    # ردیابی نتیجه‌ی سیگنال‌ها
-    # ==========================================================
     def _track_add(self, sid, symbol, direction, entry, trade, start_ms, now_ms):
         self.tracked.append({
             'id': sid, 'symbol': symbol, 'direction': direction, 'entry': entry,
@@ -475,9 +450,8 @@ class StrategyManager:
             _log(f"📈 آمار کل: {s['n']} معامله | TP {s['tp']} | SL {s['sl']} | وین‌ریت {s['tp'] / s['n'] * 100:.0f}% | جمع R = {s['r']:+.2f}")
         self.tracked = [x for x in self.tracked if x['status'] == 'OPEN']
 
-    # ==========================================================
     async def process_symbol(self, symbol):
-        h4 = await self.market_data.get_tf_data(symbol, "240")   # فقط برای EMA200 (جهت روند)
+        h4 = await self.market_data.get_tf_data(symbol, "240")
         h1 = await self.market_data.get_tf_data(symbol, "60")
         m15 = await self.market_data.get_tf_data(symbol, "15")
 
@@ -498,7 +472,6 @@ class StrategyManager:
         m15c = _tail_candles(m15, now_ms, 60)
         lst = self.setups.setdefault(symbol, [])
 
-        # --- رویدادهای جدید (لمس/شکست سطوح) ---
         prev = self.prev_scan.get(symbol)
         if prev:
             logged = 0
@@ -525,19 +498,14 @@ class StrategyManager:
                 _log(f"🎯 [{symbol}] TOUCH/BREAK {'مقاومت' if role == 'RES' else 'حمایت'} {self._zs(lv)} "
                      f"در {_ts(ev_ms)} UTC | قیمت {_fmt(price)} | منتظر کلوز ۱ساعته")
 
-        # --- پیشبرد ستاپ‌ها ---
         for st in lst:
             if st['state'] != 'DEAD':
                 self._advance(symbol, st, trend, price, h1c, m15c, atr15, atr1h, book, now_ms)
         self.setups[symbol] = lst = [x for x in lst if x['state'] != 'DEAD']
 
-        # --- نتیجه‌ی سیگنال‌های قبلی ---
         self._track_update(symbol, m15c, now_ms)
-
-        # --- ذخیره برای اسکن بعد ---
         self.prev_scan[symbol] = {'levels': book, 'price': price, 'ms': now_ms}
 
-        # --- لاگ وضعیت ---
         def _lv(b):
             mark = {'RES': '▲مقاومت', 'SUP': '▼حمایت'}[b['role']] if b['active'] else ('ر' if b['role'] == 'RES' else 'ح')
             return f"{mark} {self._zs(b)}"
