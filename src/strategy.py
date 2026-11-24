@@ -4,16 +4,19 @@ from datetime import datetime, timezone
 from logger import get_trading_logger
 
 try:
-    from levels import LEVELS, LEVELS_UPDATED
+    import levels as _levels_mod
+    LEVELS = _levels_mod.LEVELS
+    LEVELS_UPDATED = getattr(_levels_mod, 'LEVELS_UPDATED', None)
+    SYMBOLS = list(getattr(_levels_mod, 'SYMBOLS', None) or LEVELS.keys())
+    _LEVELS_ERROR = None
 except Exception as _e:          # فایل levels.py نیست یا خراب است
     LEVELS, LEVELS_UPDATED = {}, None
+    SYMBOLS = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
     _LEVELS_ERROR = repr(_e)
-else:
-    _LEVELS_ERROR = None
 
 logger = get_trading_logger()
 
-TAG = "V81"
+TAG = "V82"
 
 
 def _log(msg):
@@ -32,6 +35,11 @@ def _fmt(p):
 
 def _ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime('%m-%d %H:%M')
+
+
+def _tsi(ms):
+    """ساعت ایران (UTC+3:30) برای تطبیق راحت با چارت."""
+    return datetime.fromtimestamp(ms / 1000 + 3.5 * 3600, tz=timezone.utc).strftime('%H:%M')
 
 
 def _tail_candles(tf, now_ms, tail=40):
@@ -84,6 +92,7 @@ class StrategyManager:
 
         # ================= ردیابی نتیجه =================
         self.TRACK_MAX_H = 48
+        self.COUNTER_TREND_NOTE_IN_TYPE = True   # یادداشت ضدروند کنار Type در پیام تلگرام بیاید (اگر ربات تلگرام ایراد گرفت False کن)
 
         self.setups = {}                   # symbol -> لیست ستاپ‌ها
         self.active_setups = self.setups   # نام قدیمی (سازگاری)
@@ -111,7 +120,7 @@ class StrategyManager:
     async def start_monitoring(self):
         self.running = True
         _log(f"🚀 {TAG} Started (Manual Levels > Touch/Break > 1H > 15M Pullback)")
-        symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
+        symbols = list(SYMBOLS)
 
         while self.running:
             for symbol in symbols:
@@ -280,7 +289,8 @@ class StrategyManager:
         if hb:
             st['role'] = 'SUP' if role == 'RES' else 'RES'
             st.update(state='ARMED', kind='RETEST', since_ms=hb[1],
-                      checked_ms=max(hb[1], now_ms - self.HISTORY_TRIGGER_MAX_AGE_MIN * 60_000))
+                      checked_ms=max(hb[1], now_ms - self.HISTORY_TRIGGER_MAX_AGE_MIN * 60_000),
+                      h1_txt=f"کندل ۱ساعته {_ts(hb[0])} UTC ({_tsi(hb[0])} ایران) با کلوز {_fmt(hb[5])} بیرون زون بسته شد")
             _log(f"⚡ [{symbol}] {origin}: {fa} {self._zs(z)} رد شده (قیمت {_fmt(price)}) و کندل ۱ساعته هم با بدنه بیرون بسته ({_fmt(hb[5])}) "
                  f"→ شکست قطعی | زون الان {'مقاومت' if st['role'] == 'RES' else 'حمایت'} است | منتظر پولبک ۱۵دقیقه تا {self.RETEST_EXPIRE_H} ساعت")
         else:
@@ -311,7 +321,8 @@ class StrategyManager:
             if broke:
                 old = st['role']
                 st['role'] = 'SUP' if old == 'RES' else 'RES'
-                st.update(state='ARMED', kind='RETEST', since_ms=broke[1], checked_ms=broke[1])
+                st.update(state='ARMED', kind='RETEST', since_ms=broke[1], checked_ms=broke[1],
+                          h1_txt=f"کندل ۱ساعته {_ts(broke[0])} UTC ({_tsi(broke[0])} ایران) با کلوز {_fmt(broke[5])} بیرون زون بسته شد")
                 _log(f"💥 [{symbol}] ۱ساعته: شکست با بدنه ({_fmt(broke[5])}) | زون {self._zs(z)} از {'مقاومت' if old == 'RES' else 'حمایت'} "
                      f"به {'مقاومت' if st['role'] == 'RES' else 'حمایت'} تبدیل شد | منتظر پولبک ۱۵دقیقه تا {self.RETEST_EXPIRE_H} ساعت")
             else:
@@ -320,7 +331,8 @@ class StrategyManager:
                     self._block(symbol, z, now_ms, self.SKIP_BLOCK_H)
                     st['state'] = 'DEAD'
                     return None
-                st.update(state='ARMED', kind='REJECT', since_ms=st['event_ms'], checked_ms=st['event_ms'])
+                st.update(state='ARMED', kind='REJECT', since_ms=st['event_ms'], checked_ms=st['event_ms'],
+                          h1_txt="کندل ۱ساعته‌ی بعد از لمس بیرون زون نبست (فقط سایه)")
                 _log(f"↩️ [{symbol}] ۱ساعته: نشکست، فقط لمس با سایه (کلوز ۱ساعته بیرون زون {self._zs(z)} نرفت) | "
                      f"منتظر کندل ۱۵دقیقه‌ی رد شدن تا {self.REJECT_EXPIRE_H} ساعت")
 
@@ -332,7 +344,8 @@ class StrategyManager:
             if c[1] > st['since_ms'] and self._beyond(st['role'], z, c[5]):
                 old = st['role']
                 st['role'] = 'SUP' if old == 'RES' else 'RES'
-                st.update(kind='RETEST', since_ms=c[1], checked_ms=c[1])
+                st.update(kind='RETEST', since_ms=c[1], checked_ms=c[1],
+                          h1_txt=f"کندل ۱ساعته {_ts(c[0])} UTC ({_tsi(c[0])} ایران) با کلوز {_fmt(c[5])} بیرون زون بسته شد")
                 _log(f"💥 [{symbol}] شکست ۱ساعته ({_fmt(c[5])}) | زون {self._zs(z)}: {old}→{st['role']} | منتظر پولبک")
 
         # ---- انقضا ----
@@ -382,9 +395,10 @@ class StrategyManager:
         _, _, to, th, tl, tc = trig
         pen = (th - z['low']) if direction == 'SHORT' else (z['high'] - tl)
         ctag = ' ⚠️ برخلاف روند ۴ساعته' if counter else ''
-        _log(f"🏆 [{symbol}] {direction} Entry Triggered! #{sid} ({kind_t}){ctag} | کندل ۱۵دقیقه {_ts(trig[0])} UTC: "
+        _log(f"🏆 [{symbol}] {direction} Entry Triggered! #{sid} ({kind_t}){ctag} | تأیید ۱ساعته: {st.get('h1_txt', '—')} | "
+             f"کندل ۱۵دقیقه {_ts(trig[0])} UTC ({_tsi(trig[0])} ایران): "
              f"O{_fmt(to)} H{_fmt(th)} L{_fmt(tl)} C{_fmt(tc)} | نفوذ داخل زون {pen:.4g} | زون {self._zs(z)}")
-        _log(f"📒 JOURNAL | #{sid} | {symbol} | {direction} | {st['kind']} | زون {self._zs(z)} | ورود {_fmt(entry)} "
+        _log(f"📒 JOURNAL | #{sid} | {symbol} | {direction} | {st['kind']} | {st.get('h1_txt', '—')} | زون {self._zs(z)} | ورود {_fmt(entry)} "
              f"SL {_fmt(trade['sl'])} TP1 {_fmt(trade['tp1'])} TP2 {_fmt(trade['tp2']) if trade['tp2'] else '—'} | "
              f"ریسک {trade['risk'] / entry * 100:.2f}% = {trade['risk'] / atr1h:.2f} ATR(1H) | فضا تا سطح مخالف {trade['room_txt']} | "
              f"روند {trend}{' (ضدروند)' if counter else ''} | {_ts(now_ms)} UTC")
@@ -441,7 +455,7 @@ class StrategyManager:
         note = (f"⚠️ برخلاف روند ۴ساعته ({'نزولی' if trend == 'DOWNTREND' else 'صعودی'}، EMA200) — تصمیم با خودت" if counter else '')
         signal = {
             'symbol': symbol,
-            'type': 'SELL' if direction == 'SHORT' else 'BUY',
+            'type': ('SELL' if direction == 'SHORT' else 'BUY') + (' ⚠️ برخلاف روند ۴ساعته' if (counter and self.COUNTER_TREND_NOTE_IN_TYPE) else ''),
             'direction': direction,
             'entry_price': entry,
             'stop_loss': round(trade['sl'], 4),
