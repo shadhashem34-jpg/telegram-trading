@@ -7,7 +7,16 @@ from logger import get_trading_logger
 
 logger = get_trading_logger()
 
-TAG = "V90"     # سطح دستی ۱ساعته → تأیید ۱ساعته → تأیید ۱۵دقیقه → کندل تأیید/ورود ۵دقیقه
+TAG = "V91"     # سطح دستی ۱ساعته → (بسته‌شدن کندل ۱ساعته: بریک/فیک‌بریک) → تأیید ۱۵دقیقه → کندل تأیید/ورود ۵دقیقه
+
+_H1_TXT = {
+    'BREAK': 'کلوز بیرون زون (شکست)',
+    'FAKE': 'فیک‌بریک (سایه از لبه‌ی دور زون رد شد ولی کلوز برگشت)',
+    'REJECT': 'لمس و برگشت بدون عبور از زون (رد شدن ساده؛ طبق تنظیمات نادیده گرفته شد)',
+    'INSIDE': 'کلوز داخل زون؛ نه شکست نه فیک‌بریک',
+    'NONE': 'نه شکست بود نه فیک‌بریک',
+}
+_KIND_TXT = {'BREAK': 'پولبک بعد از شکست', 'FAKE': 'فیک‌بریک', 'REJECT': 'رد شدن از سطح'}
 
 
 def _log(msg):
@@ -57,8 +66,10 @@ def _tail(tf, now_ms, tail=60):
 
 
 class StrategyManager:
-    """V90: سطوح دستی ۱ساعته؛ لمس/عبور → کندل ۱ساعته تأیید (شکست قاطع یا رد شدن)
-    → کندل ۱۵دقیقه تأیید → کندل تأیید ۵دقیقه (پولبک یا رد شدن، با امتیازدهی) → سیگنال."""
+    """V91: سطوح دستی ۱ساعته. لمس زون → صبر تا کندل ۱ساعته‌ی آن بسته شود:
+       بریک (کلوز بیرون زون) یا فیک‌بریک (سایه بیرون، کلوز برگشته) ← تأیید ۱۵دقیقه (اول آخرین ۱۵دقیقه‌ی همان ساعت، وگرنه کندل‌های بعدی)
+       ← کندل تأیید ۵دقیقه (پولبک/رد شدن، با امتیازدهی) ← سیگنال.
+       اگر کندل ۱ساعته داخل زون بسته شود (نه بریک نه فیک‌بریک) سیگنالی ساخته نمی‌شود."""
 
     def __init__(self, telegram_bot=None):
         self.running = False
@@ -66,50 +77,58 @@ class StrategyManager:
         self.market_data = None
 
         # ================= سطوح دستی =================
-        self.SINGLE_LEVEL_HALF_WIDTH_PCT = 0.125
-        self.STALE_LEVELS_HOURS = 30
+        self.SINGLE_LEVEL_HALF_WIDTH_PCT = 0.125   # اگر فقط یک عدد دادی: ±این‌قدر درصد
+        self.STALE_LEVELS_HOURS = 30               # سطوح قدیمی‌تر از این: هشدار در لاگ
         self.WARN_EVERY_MIN = 60
 
-        # ================= شکست =================
-        self.BREAK_MARGIN_ATR15 = 0.2
-        self.BREAK_MIN_BODY_RATIO = 0.5
-        self.RETEST_EXPIRE_H = 6
-        self.REJECT_EXPIRE_H = 3
-        self.WAIT_1H_EXPIRE_H = 2            # مهلت کلوز کندل ۱ساعته بعد از لمس
-        self.WAIT_15M_EXPIRE_H = 1           # مهلت کلوز کندل ۱۵دقیقه بعد از تأیید ۱ساعته
-        self.APPROACH_FILTER = True
+        # ================= تأیید ۱ساعته (بسته‌شدن کندل) =================
+        self.BREAK_MARGIN_ATR1H = 0.1       # کلوز ۱ساعته حداقل این‌قدر ATR(1H) بیرون لبه‌ی دور زون = بریک
+        self.FAKE_PIERCE_ATR1H = 0.05       # سایه حداقل این‌قدر ATR(1H) از لبه‌ی دور زون رد شود و کلوز برگردد = فیک‌بریک
+        self.TOUCH_TOL_ATR1H = 0.1          # تلورانس لمس زون
+        self.MAX_1H_UNRESOLVED = 3          # این‌قدر کندل ۱ساعته‌ی بسته‌شده بدون بریک/فیک‌بریک → ستاپ حذف
+        self.ALLOW_PLAIN_REJECT = False     # True = «لمس و برگشت بدون عبور از زون» هم ستاپ شود (پیش‌فرض: فقط بریک/فیک‌بریک)
+
+        # ================= تأیید ۱۵دقیقه =================
+        self.BREAK_MARGIN_ATR15 = 0.2       # کلوز ۱۵دقیقه حداقل این‌قدر ATR(15m) بیرون لبه‌ی دور زون
+        self.BREAK_MIN_BODY_RATIO = 0.5     # و بدنه ≥ این نسبت از کل کندل (قاطع، نه دوجی)
+        self.REJECT15_MARGIN_ATR15 = 0.1    # فیک‌بریک/رد شدن: کلوز ۱۵دقیقه حداقل این‌قدر بیرون لبه‌ی نزدیک زون (سمت معامله)
+        self.WAIT_15M_MAX_MIN = 60          # بعد از بسته‌شدن کندل ۱ساعته، حداکثر این‌قدر دقیقه منتظر تأیید ۱۵دقیقه
+
+        # ================= مهلت‌ها =================
+        self.RETEST_EXPIRE_H = 6            # مهلت پولبک ۵دقیقه بعد از تأیید ۱۵دقیقه‌ی «بریک»
+        self.REJECT_EXPIRE_H = 3            # مهلت ورود ۵دقیقه بعد از تأیید ۱۵دقیقه‌ی «فیک‌بریک/رد شدن»
+        self.APPROACH_FILTER = True         # فقط برای «رد شدن ساده»: قیمت ساعت‌ها کنار سطح نچرخیده باشد
         self.APPROACH_LOOKBACK_C15 = 16
         self.APPROACH_CLEAR_C15 = 8
         self.APPROACH_MIN_DIST_ATR15 = 1.0
         self.SKIP_BLOCK_H = 1
-        self.HISTORY_TRIGGER_MAX_AGE_MIN = 10
         self.START_INSIDE_TOL_PCT = 0.03
         self.LOG_ONLY_COOLDOWN_H = 2
 
         # ================= کندل تأیید ۵دقیقه =================
-        self.TOUCH_TOL_ATR5 = 0.15
-        self.MIN_RANGE_ATR5 = 0.4
-        self.MIN_CONFIRM_SCORE = 3
-        self.PIN_WICK_RATIO = 0.5
+        self.TOUCH_TOL_ATR5 = 0.15          # رسیدن سایه تا این‌قدر نزدیک زون هم «لمس» است
+        self.MIN_RANGE_ATR5 = 0.4           # کندل خیلی ریز (رنج < این‌قدر ATR(5m)) اصلاً بررسی نمی‌شود
+        self.MIN_CONFIRM_SCORE = 3          # حداقل امتیاز (از ۸) برای سیگنال
+        self.PIN_WICK_RATIO = 0.5           # سایه‌ی رد کننده ≥ ۵۰٪ کل کندل
         self.STRONG_BODY_RATIO = 0.5
-        self.CLOSE_EXTREME_RATIO = 0.30
-        self.SHALLOW_ATR5 = 0.3
-        self.VOL_LOOKBACK = 20
-        self.VOL_SPIKE_RATIO = 1.3
+        self.CLOSE_EXTREME_RATIO = 0.30     # کلوز در ۳۰٪ انتهایی کندل
+        self.SHALLOW_ATR5 = 0.3             # سایه بیشتر از این‌قدر ATR(5m) از لبه‌ی دور زون عبور نکرده
+        self.VOL_LOOKBACK = 20              # میانگین حجم ۲۰ کندل قبل
+        self.VOL_SPIKE_RATIO = 1.3          # حجم کندل تأیید ≥ ۱.۳ برابر میانگین → امتیاز
 
         # ================= ستاپ و سیگنال =================
         self.MAX_SETUPS = 2
         self.ZONE_COOLDOWN_H = 2
         self.SIGNAL_COOLDOWN_MIN = 15
-        self.MAX_DRIFT_ATR5 = 2.0
-        self.COUNTER_TREND_NOTE_IN_TYPE = True
+        self.MAX_DRIFT_ATR5 = 2.0           # قیمت زنده بیشتر از این‌قدر ATR(5m) از ورود دور شد → رد
+        self.COUNTER_TREND_NOTE_IN_TYPE = True   # اگر ربات تلگرام ایراد گرفت False کن
 
         # ================= حد ضرر / هدف =================
         self.SL_ATR5_BUFFER = 0.5
         self.MIN_RISK_ATR15 = 0.75
         self.MAX_RISK_ATR15 = 4.0
         self.RR1 = 1.5
-        self.MIN_ROOM_R = 1.0
+        self.MIN_ROOM_R = 1.0               # سطح مخالف نزدیک‌تر از این‌قدر R بود، سیگنال نده (۰ = خاموش)
         self.TRACK_MAX_H = 24
 
         # ================= اسکن =================
@@ -154,7 +173,7 @@ class StrategyManager:
 
     async def start_monitoring(self):
         self.running = True
-        _log(f"🚀 {TAG} Started (سطح ۱ساعته > تأیید ۱ساعته > تأیید ۱۵دقیقه > ورود ۵دقیقه)")
+        _log(f"🚀 {TAG} Started (سطح ۱ساعته → بسته‌شدن کندل ۱ساعته: بریک/فیک‌بریک → تأیید ۱۵دقیقه → ورود ۵دقیقه)")
         while self.running:
             self._check_levels_reload()
             syms = self.symbols
@@ -203,7 +222,7 @@ class StrategyManager:
             if m == self._lv_mtime:
                 return
             if self._load_levels():
-                self.prev_scan.clear()
+                self.prev_scan.clear()      # اسکن بعدی با سطوح جدید شروع شود
                 _log(f"🔄 [{TAG}] levels.py تغییر کرد و دوباره خوانده شد (به‌روزرسانی: {self.levels_updated}) | "
                      + " | ".join(f"{s}: {len(v)} زون" for s, v in self.levels.items()))
             else:
@@ -231,6 +250,8 @@ class StrategyManager:
 
     @staticmethod
     def _pick_active(book, price):
+        """نزدیک‌ترین زون بالای قیمت (مقاومت) و نزدیک‌ترین زیر قیمت (حمایت) فعال‌اند.
+        نقش‌ها از موقعیت نسبت به قیمت می‌آید؛ بعد از شکست، سطح شکسته خودکار نقش مقابل را می‌گیرد."""
         for b in book:
             if b['mid'] > price:
                 b['role'], b['dist'] = 'RES', max(0.0, b['low'] - price)
@@ -274,6 +295,7 @@ class StrategyManager:
         self.blocked.setdefault(symbol, []).append((z['low'], z['high'], now_ms + h * 3_600_000))
 
     def _detect_events(self, symbol, prev, c5, price, now_ms):
+        """هر سطحی از اسکن قبلی که تا الان لمس/رد شده (قبلش از سمت درست آمده بوده)."""
         pp = prev['price']
         candles = [c for c in c5 if c[1] > prev['ms']]
         active = self.setups.get(symbol, [])
@@ -310,18 +332,19 @@ class StrategyManager:
     def _beyond(role, z, close):
         return (role == 'RES' and close > z['high']) or (role == 'SUP' and close < z['low'])
 
-    def _is_break(self, role, z, c, atr):
-        """شکست واقعی: کلوز بیرون لبه‌ی دور زون با فاصله + بدنه‌ی قاطع در جهت شکست."""
+    def _is_break(self, role, z, c, atr15):
+        """شکست واقعی در ۱۵دقیقه: کلوز بیرون لبه‌ی دور زون با فاصله + بدنه‌ی قاطع در جهت شکست."""
         _, _, o, h, l, cl = c
         rng = max(h - l, 1e-12)
         if abs(cl - o) < self.BREAK_MIN_BODY_RATIO * rng:
             return False
-        margin = self.BREAK_MARGIN_ATR15 * atr
+        margin = self.BREAK_MARGIN_ATR15 * atr15
         if role == 'RES':
             return cl > z['high'] + margin and cl > o
         return cl < z['low'] - margin and cl < o
 
     def _side_from_history(self, z, price, c5, c15):
+        """قیمت داخل زون است: از کدام سمت آمده؟ آخرین کلوزِ بیرون زون."""
         for series in (c5, c15):
             for c in reversed(series):
                 if c[5] < z['low']:
@@ -331,6 +354,7 @@ class StrategyManager:
         return 'RES' if price < (z['low'] + z['high']) / 2 else 'SUP'
 
     def _fresh_approach(self, lv, role, c15, atr15, ev_ms, price):
+        """لمس معتبر = قیمت از دور آمده؛ نه اینکه ساعت‌ها کنار سطح چرخیده باشد."""
         if not self.APPROACH_FILTER:
             return True, "فیلتر خاموش است"
         prior = [c for c in c15 if c[1] <= ev_ms][-self.APPROACH_LOOKBACK_C15:]
@@ -350,21 +374,24 @@ class StrategyManager:
             return False, f"دورترین فاصله‌ی قیمت از سطح فقط {far / atr15:.2f} ATR(15m) بوده"
         return True, "ok"
 
-    def _new_setup(self, symbol, lv, role, ev_ms, price, now_ms, fresh_ok, fresh_why, origin):
-        """همه‌ی ستاپ‌ها از WAIT_1H شروع می‌کنند؛ صبر برای کلوز کندل ۱ساعته."""
+    def _new_setup(self, symbol, lv, role, ev_ms, price, now_ms, c15, atr15, fresh_ok, fresh_why, origin):
+        """فقط ثبت رویداد؛ تا بسته‌شدن کندل ۱ساعته هیچ تصمیمی گرفته نمی‌شود."""
         z = {'low': lv['low'], 'high': lv['high']}
-        st = {'state': 'WAIT_1H', 'role': role, 'zone': z, 'event_ms': ev_ms, 'kind': None,
-              'since_ms': ev_ms, 'checked_ms': ev_ms, 'fresh_ok': fresh_ok, 'fresh_why': fresh_why,
-              'c1h_txt': '—', 'c15_txt': '—'}
+        st = {'state': 'WAIT_1H', 'role': role, 'orig_role': role, 'zone': z, 'event_ms': ev_ms, 'kind': None,
+              'since_ms': ev_ms, 'checked_ms': ev_ms, 'h1_checked_ms': 0, 'h1_n': 0, 'h1_close_ms': 0,
+              'c15_from': 0, 'c15_checked_ms': 0, 'fresh_ok': fresh_ok, 'fresh_why': fresh_why,
+              'h1_txt': '—', 'c15_txt': '—'}
         fa = 'مقاومت' if role == 'RES' else 'حمایت'
-        _log(f"🎯 [{TAG}][{symbol}] {origin}: {fa} {self._zs(z)} | قیمت {_fmt(price)} | ثبت شد؛ "
-             f"منتظر کلوز کندل ۱ساعته (حداکثر {self.WAIT_1H_EXPIRE_H} ساعت)")
+        _log(f"🎯 [{TAG}][{symbol}] {origin}: {fa} {self._zs(z)} | قیمت {_fmt(price)} | ثبت شد؛ منتظر بسته‌شدن کندل ۱ساعته")
         return st
 
     # ==========================================================
     # کندل تأیید ۵دقیقه
     # ==========================================================
     def _eval_confirm(self, role, z, c, prev, atr5, relvol):
+        """None اگر دروازه رد شد؛ وگرنه {'score','flags',...}.
+        دروازه: رنج کندل کافی، سایه به زون برسد، کلوز بیرون زون (در جهت ستاپ)، جهت کندل درست.
+        امتیاز (حداکثر ۸): پین‌بار ۲، انگالف ۲، بدنه‌ی قوی ۱، کلوز در انتهای کندل ۱، پولبک کم‌عمق ۱، حجم بالا ۱."""
         _, _, o, h, l, cl = c
         rng = max(h - l, 1e-12)
         if rng < self.MIN_RANGE_ATR5 * atr5:
@@ -406,4 +433,400 @@ class StrategyManager:
             return None
         return cur / (sum(prior) / len(prior))
 
-    # =========================================================
+    # ==========================================================
+    # ماشین حالت: WAIT_15M -> ARMED -> سیگنال
+    # ==========================================================
+    def _classify_1h(self, role, z, c, atr1h):
+        """نتیجه‌ی یک کندل ۱ساعته‌ی بسته‌شده نسبت به زون: BREAK / FAKE / REJECT / INSIDE / NONE."""
+        _, _, o, h, l, cl = c
+        m = self.BREAK_MARGIN_ATR1H * atr1h
+        p = self.FAKE_PIERCE_ATR1H * atr1h
+        tol = self.TOUCH_TOL_ATR1H * atr1h
+        if role == 'RES':
+            if cl > z['high'] + m:
+                return 'BREAK'
+            if h > z['high'] + p and cl <= z['high']:
+                return 'FAKE'
+            if h >= z['low'] - tol and cl < z['low']:
+                return 'REJECT'
+        else:
+            if cl < z['low'] - m:
+                return 'BREAK'
+            if l < z['low'] - p and cl >= z['low']:
+                return 'FAKE'
+            if l <= z['high'] + tol and cl > z['high']:
+                return 'REJECT'
+        if z['low'] <= cl <= z['high']:
+            return 'INSIDE'
+        return 'NONE'
+
+    def _confirm15(self, kind, orig_role, z, c, atr15):
+        """تأیید ۱۵دقیقه.
+        BREAK: کندل شکست قاطع (کلوز بیرون لبه‌ی دور زون با فاصله + بدنه‌ی قوی).
+        FAKE/REJECT: کندل ۱۵دقیقه‌ای که کلوزش به سمت معامله از زون بیرون آمده و جهتش درست است،
+                     و یا سایه‌اش از لبه‌ی دور زون رد شده (فیک‌بریک ۱۵دقیقه‌ای) یا بدنه‌ی قاطع دارد."""
+        if kind == 'BREAK':
+            return self._is_break(orig_role, z, c, atr15)
+        _, _, o, h, l, cl = c
+        rng = max(h - l, 1e-12)
+        body = abs(cl - o)
+        m = self.REJECT15_MARGIN_ATR15 * atr15
+        if orig_role == 'RES':
+            if not (cl < z['low'] - m and cl < o):
+                return False
+            swept = h > z['high']
+        else:
+            if not (cl > z['high'] + m and cl > o):
+                return False
+            swept = l < z['low']
+        return swept or body >= self.BREAK_MIN_BODY_RATIO * rng
+
+    def _step_wait_1h(self, symbol, st, h1c, atr1h, now_ms):
+        """منتظر بسته‌شدن کندل ۱ساعته‌ی بعد از لمس؛ بریک/فیک‌بریک → WAIT_15M، وگرنه صبر یا حذف."""
+        z = st['zone']
+        for c in h1c:
+            if c[1] <= st['event_ms'] or c[1] <= st['h1_checked_ms']:
+                continue
+            st['h1_checked_ms'] = c[1]
+            res = self._classify_1h(st['role'], z, c, atr1h)
+            ctxt = f"کندل ۱ساعته {_ts(c[0])} UTC ({_tsi(c[0])} ایران) O{_fmt(c[2])} H{_fmt(c[3])} L{_fmt(c[4])} C{_fmt(c[5])}"
+            go = res in ('BREAK', 'FAKE') or (res == 'REJECT' and self.ALLOW_PLAIN_REJECT)
+            if not go:
+                st['h1_n'] += 1
+                _log(f"⏳ [{TAG}][{symbol}] {ctxt} | زون {self._zs(z)}: {_H1_TXT[res]} → سیگنالی ساخته نمی‌شود "
+                     f"({st['h1_n']}/{self.MAX_1H_UNRESOLVED}؛ منتظر کندل ۱ساعته‌ی بعدی)")
+                if st['h1_n'] >= self.MAX_1H_UNRESOLVED:
+                    _log(f"⌛ [{TAG}][{symbol}] ستاپ زون {self._zs(z)} بدون بریک/فیک‌بریک ۱ساعته حذف شد")
+                    self._block(symbol, z, now_ms, self.SKIP_BLOCK_H)
+                    st['state'] = 'DEAD'
+                    return
+                continue
+            if res == 'REJECT' and not st.get('fresh_ok', True):
+                _log(f"🚫 [{TAG}][{symbol}] رد شدن ساده از زون {self._zs(z)} نادیده گرفته شد: {st['fresh_why']}")
+                self._block(symbol, z, now_ms, self.SKIP_BLOCK_H)
+                st['state'] = 'DEAD'
+                return
+            st['h1_txt'] = f"{ctxt} → {_H1_TXT[res]}"
+            if res == 'BREAK':
+                st['role'] = 'SUP' if st['orig_role'] == 'RES' else 'RES'
+            st.update(state='WAIT_15M', kind=res, h1_close_ms=c[1], since_ms=c[1], checked_ms=c[1],
+                      c15_from=c[1] - 15 * 60_000, c15_checked_ms=0)
+            fa = 'مقاومت' if st['orig_role'] == 'RES' else 'حمایت'
+            extra = (f" | زون الان {'مقاومت' if st['role'] == 'RES' else 'حمایت'} است (منتظر پولبک)" if res == 'BREAK'
+                     else " | منتظر رد شدن و برگشت از زون")
+            _log(f"{'💥' if res == 'BREAK' else '🪤'} [{TAG}][{symbol}] {st['h1_txt']} | {fa} {self._zs(z)}{extra} | "
+                 f"الان آخرین کندل ۱۵دقیقه‌ی همان ساعت بررسی می‌شود")
+            return
+
+    def _step_wait_15m(self, symbol, st, c15, atr15, now_ms):
+        """اول آخرین کندل ۱۵دقیقه‌ی همان ساعت (که با کندل ۱ساعته بسته شد)، اگر تأیید نکرد کندل‌های ۱۵دقیقه‌ی بعدی."""
+        z = st['zone']
+        for c in c15:
+            if c[0] < st['c15_from'] or c[1] <= st['c15_checked_ms']:
+                continue
+            st['c15_checked_ms'] = c[1]
+            if self._confirm15(st['kind'], st['orig_role'], z, c, atr15):
+                which = "آخرین ۱۵دقیقه‌ی همان ساعت" if c[0] == st['c15_from'] else "کندل ۱۵دقیقه‌ی بعدی"
+                st.update(state='ARMED', since_ms=c[1], checked_ms=c[1],
+                          c15_txt=f"{which}: {_ts(c[0])} UTC ({_tsi(c[0])} ایران) O{_fmt(c[2])} H{_fmt(c[3])} L{_fmt(c[4])} C{_fmt(c[5])}")
+                _log(f"✅ [{TAG}][{symbol}] تأیید ۱۵دقیقه ({_KIND_TXT[st['kind']]}) | {st['c15_txt']} | زون {self._zs(z)} | "
+                     f"منتظر کندل تأیید ۵دقیقه")
+                return
+            if c[0] == st['c15_from']:
+                _log(f"⏳ [{TAG}][{symbol}] آخرین ۱۵دقیقه‌ی ساعت تأیید نکرد (C{_fmt(c[5])}) | زون {self._zs(z)} | منتظر بسته‌شدن کندل ۱۵دقیقه‌ی بعدی")
+        if st['state'] == 'WAIT_15M' and now_ms - st['h1_close_ms'] > self.WAIT_15M_MAX_MIN * 60_000:
+            _log(f"⌛ [{TAG}][{symbol}] ستاپ {st['kind']} روی زون {self._zs(z)}: تأیید ۱۵دقیقه در {self.WAIT_15M_MAX_MIN} دقیقه نیامد؛ حذف شد")
+            self._block(symbol, z, now_ms, self.SKIP_BLOCK_H)
+            st['state'] = 'DEAD'
+
+    # ==========================================================
+    # ماشین حالت: WAIT_1H -> WAIT_15M -> ARMED -> سیگنال
+    # ==========================================================
+    def _advance(self, symbol, st, trend, price, h1c, c15, c5, v5, atr5, atr15, atr1h, targets, now_ms):
+        z = st['zone']
+
+        if st['state'] == 'WAIT_1H':
+            self._step_wait_1h(symbol, st, h1c, atr1h, now_ms)
+        if st['state'] == 'WAIT_15M':
+            self._step_wait_15m(symbol, st, c15, atr15, now_ms)
+        if st['state'] != 'ARMED':
+            return None
+
+        # ---- کلوز ۱ساعته‌ی بعدی علیه ستاپ: ساختار خراب شد ----
+        for c in h1c:
+            if c[1] > st['h1_close_ms'] and self._beyond(st['role'], z, c[5]):
+                _log(f"❎ [{TAG}][{symbol}] کلوز ۱ساعته ({_fmt(c[5])}) علیه ستاپ {st['kind']} روی زون {self._zs(z)} بسته شد؛ ستاپ باطل شد")
+                st['state'] = 'DEAD'
+                return None
+
+        # ---- انقضا ----
+        hours = self.RETEST_EXPIRE_H if st['kind'] == 'BREAK' else self.REJECT_EXPIRE_H
+        if now_ms - st['since_ms'] > hours * 3_600_000:
+            _log(f"⌛ [{TAG}][{symbol}] ستاپ {st['kind']} روی زون {self._zs(z)} بدون سیگنال منقضی شد")
+            self._block(symbol, z, now_ms)
+            st['state'] = 'DEAD'
+            return None
+
+        # ---- کندل تأیید ۵دقیقه ----
+        best = None
+        last_cm = st['checked_ms']
+        for i, c in enumerate(c5):
+            if c[1] <= max(st['since_ms'], st['checked_ms']):
+                continue
+            last_cm = max(last_cm, c[1])
+            ev = self._eval_confirm(st['role'], z, c, c5[i - 1] if i > 0 else None, atr5, self._relvol(c5, i, v5))
+            if ev is None:
+                continue
+            if ev['score'] >= self.MIN_CONFIRM_SCORE:
+                best = (c, ev)
+            else:
+                _log(f"➖ [{TAG}][{symbol}] کندل ۵دقیقه {_ts(c[0])} UTC ({_tsi(c[0])} ایران) به زون {self._zs(z)} رسید ولی تأیید ضعیف بود "
+                     f"(امتیاز {ev['score']} از ۸؛ حداقل {self.MIN_CONFIRM_SCORE})")
+        st['checked_ms'] = last_cm
+        if not best:
+            return None
+        trig, ev = best
+
+        direction = 'SHORT' if st['role'] == 'RES' else 'LONG'
+        counter = (direction == 'SHORT' and trend != 'DOWNTREND') or (direction == 'LONG' and trend != 'UPTREND')
+        entry = trig[5]
+        if atr5 and abs(price - entry) > self.MAX_DRIFT_ATR5 * atr5:
+            _log(f"⏭️ [{TAG}][{symbol}] تأیید {direction} دیده شد ولی قیمت از ورود ({_fmt(entry)}) دور شده ({_fmt(price)})؛ فرصت از دست رفت")
+            return None
+        if now_ms - self.last_signal_ms.get(symbol, 0) < self.SIGNAL_COOLDOWN_MIN * 60_000:
+            _log(f"⏸️ [{TAG}][{symbol}] تأیید {direction} دیده شد ولی کمتر از {self.SIGNAL_COOLDOWN_MIN} دقیقه از سیگنال قبلی گذشته")
+            return None
+
+        trade = self._build_trade(symbol, direction, entry, z, trig, atr5, atr15, targets)
+        if trade is None:
+            return None
+
+        self.last_signal_ms[symbol] = now_ms
+        self.seq += 1
+        sid = self.seq
+        flags_txt = "+".join(k for k, v in ev['flags'].items() if v) or "—"
+        ctag = ' ⚠️ برخلاف روند ۴ساعته' if counter else ''
+        _, _, to, th, tl, tc = trig
+        kind_t = _KIND_TXT.get(st['kind'], st['kind'])
+        rv = f"{ev['relvol']:.2f}x" if ev['relvol'] is not None else "—"
+        _log(f"🏆 [{TAG}][{symbol}] {direction} Entry Triggered! #{sid} ({kind_t}){ctag} | تأیید ۱ساعته: {st.get('h1_txt', '—')} | تأیید ۱۵دقیقه: {st.get('c15_txt', '—')} | "
+             f"کندل ۵دقیقه {_ts(trig[0])} UTC ({_tsi(trig[0])} ایران): O{_fmt(to)} H{_fmt(th)} L{_fmt(tl)} C{_fmt(tc)} | "
+             f"امتیاز {ev['score']}/۸ [{flags_txt}] | حجم {rv} | زون {self._zs(z)}")
+        _log(f"📒 JOURNAL | #{sid} | {symbol} | {direction} | {st['kind']} | امتیاز {ev['score']}/۸ [{flags_txt}] | حجم {rv} | "
+             f"سایه {ev['wick'] * 100:.0f}% بدنه {ev['body'] * 100:.0f}% | زون {self._zs(z)} | ورود {_fmt(entry)} SL {_fmt(trade['sl'])} "
+             f"TP1 {_fmt(trade['tp1'])} TP2 {_fmt(trade['tp2']) if trade['tp2'] else '—'} | "
+             f"ریسک {trade['risk'] / entry * 100:.2f}% = {trade['risk'] / atr15:.2f} ATR(15m) | {trade['room_txt']} | "
+             f"روند {trend}{' (ضدروند)' if counter else ''} | {_ts(now_ms)} UTC")
+        self.send_signal(symbol, direction, entry, trade, counter, trend, ev)
+        self._track_add(sid, symbol, direction, entry, trade, trig[1], now_ms, counter, ev)
+        self._block(symbol, z, now_ms)
+        st['state'] = 'DEAD'
+        return True
+
+    # ==========================================================
+    # حد ضرر / هدف
+    # ==========================================================
+    def _build_trade(self, symbol, direction, entry, z, trig, atr5, atr15, targets):
+        buf = self.SL_ATR5_BUFFER * atr5
+        sl = (max(z['high'], trig[3]) + buf) if direction == 'SHORT' else (min(z['low'], trig[4]) - buf)
+        risk = abs(entry - sl)
+        if atr15:
+            if risk > self.MAX_RISK_ATR15 * atr15:
+                _log(f"🚫 [{TAG}][{symbol}] {direction} روی {self._zs(z)} رد شد: ریسک {risk / atr15:.2f} ATR(15m) از سقف {self.MAX_RISK_ATR15} بیشتر است")
+                return None
+            if risk < self.MIN_RISK_ATR15 * atr15:
+                risk = self.MIN_RISK_ATR15 * atr15
+                sl = entry + risk if direction == 'SHORT' else entry - risk
+        if risk <= 0:
+            return None
+
+        # نزدیک‌ترین سطوح در جهت معامله (لبه‌ی نزدیک به قیمت)
+        if direction == 'SHORT':
+            edges = sorted({b['high'] for b in targets if b['high'] < entry - 1e-9 and b['mid'] < z['low']}, reverse=True)
+            dists = [entry - e for e in edges]
+        else:
+            edges = sorted({b['low'] for b in targets if b['low'] > entry + 1e-9 and b['mid'] > z['high']})
+            dists = [e - entry for e in edges]
+
+        d1 = self.RR1 * risk
+        tp1_dist, tp2_edge = d1, 0
+        room_txt = "سطحی در مسیر نیست"
+        if dists:
+            room_txt = f"نزدیک‌ترین سطح مسیر {dists[0] / risk:.2f}R ({_fmt(edges[0])})"
+            if self.MIN_ROOM_R and dists[0] < self.MIN_ROOM_R * risk:
+                _log(f"🚫 [{TAG}][{symbol}] {direction} روی {self._zs(z)} رد شد: سطح مسیر فقط {dists[0] / risk:.2f}R آن‌طرف‌تر است "
+                     f"({_fmt(edges[0])}؛ حداقل {self.MIN_ROOM_R}R)")
+                return None
+            if dists[0] < d1:
+                tp1_dist = dists[0]                      # TP1 قبل از مانع
+                tp2_edge = edges[1] if len(edges) > 1 else 0
+            else:
+                tp2_edge = edges[0]
+        tp1 = entry - tp1_dist if direction == 'SHORT' else entry + tp1_dist
+        return {'sl': sl, 'tp1': tp1, 'tp2': tp2_edge, 'risk': risk, 'r_tp1': tp1_dist / risk, 'room_txt': room_txt}
+
+    def send_signal(self, symbol, direction, entry, trade, counter=False, trend='', ev=None):
+        base = 'SELL' if direction == 'SHORT' else 'BUY'
+        typ = base + (' ⚠️ برخلاف روند ۴ساعته' if (counter and self.COUNTER_TREND_NOTE_IN_TYPE) else '')
+        note = (f"⚠️ برخلاف روند ۴ساعته ({'نزولی' if trend == 'DOWNTREND' else 'صعودی'}، EMA200) — تصمیم با خودت" if counter else '')
+        signal = {
+            'symbol': symbol, 'type': typ, 'direction': direction, 'entry_price': entry,
+            'stop_loss': round(trade['sl'], 4), 'take_profit_1': round(trade['tp1'], 4),
+            'take_profit_2': round(trade['tp2'], 4) if trade['tp2'] else 0, 'take_profit_3': 0,
+            'strategy': f'{TAG}_1H_levels_15m_5m' + (' | ⚠️ برخلاف روند' if counter else ''),
+            'note': note, 'counter_trend': counter, 'confirm_score': ev['score'] if ev else 0,
+        }
+        _log(f"📤 [{TAG}][{symbol}] SIGNAL {typ} | Entry {_fmt(entry)} | SL {_fmt(trade['sl'])} | TP1 {_fmt(trade['tp1'])} ({trade['r_tp1']:.2f}R) | "
+             f"TP2 {_fmt(trade['tp2']) if trade['tp2'] else '—'}")
+        if not self.telegram_bot:
+            _log(f"⚠️ [{TAG}][{symbol}] telegram_bot تنظیم نشده؛ سیگنال ارسال نشد")
+            return signal
+        task = asyncio.create_task(self.telegram_bot.send_signal(signal))
+        task.add_done_callback(self._on_send_done)
+        return signal
+
+    @staticmethod
+    def _on_send_done(task):
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        _log(f"❌ ارسال سیگنال به تلگرام شکست خورد: {exc!r}" if exc else "✅ سیگنال به تلگرام فرستاده شد")
+
+    # ==========================================================
+    # ردیابی نتیجه‌ی سیگنال‌ها
+    # ==========================================================
+    def _track_add(self, sid, symbol, direction, entry, trade, start_ms, now_ms, counter, ev):
+        self.tracked.append({'id': sid, 'symbol': symbol, 'direction': direction, 'entry': entry, 'sl': trade['sl'],
+                             'tp': trade['tp1'], 'risk': trade['risk'], 'r_tp': trade['r_tp1'], 'start_ms': start_ms,
+                             'created_ms': now_ms, 'last_cm': start_ms, 'mfe': 0.0, 'mae': 0.0, 'status': 'OPEN',
+                             'counter': counter, 'flags': [k for k, v in ev['flags'].items() if v], 'score': ev['score']})
+
+    def _track_update(self, symbol, c5, now_ms):
+        for t in self.tracked:
+            if t['symbol'] != symbol or t['status'] != 'OPEN':
+                continue
+            for (ot, cm, o, h, l, c) in c5:
+                if ot < t['start_ms'] or cm <= t['last_cm']:
+                    continue
+                t['last_cm'] = cm
+                if t['direction'] == 'SHORT':
+                    t['mfe'] = max(t['mfe'], (t['entry'] - l) / t['risk'])
+                    t['mae'] = max(t['mae'], (h - t['entry']) / t['risk'])
+                    hit_sl, hit_tp = h >= t['sl'], l <= t['tp']
+                else:
+                    t['mfe'] = max(t['mfe'], (h - t['entry']) / t['risk'])
+                    t['mae'] = max(t['mae'], (t['entry'] - l) / t['risk'])
+                    hit_sl, hit_tp = l <= t['sl'], h >= t['tp']
+                if hit_sl or hit_tp:
+                    self._track_close(t, 'SL' if hit_sl else 'TP1', cm, hit_sl and hit_tp)
+                    break
+            if t['status'] == 'OPEN' and now_ms - t['created_ms'] > self.TRACK_MAX_H * 3_600_000:
+                self._track_close(t, 'OPEN-EXPIRED', now_ms, False)
+
+    def _track_close(self, t, result, ms, ambiguous):
+        t['status'] = result
+        r = t['r_tp'] if result == 'TP1' else (-1.0 if result == 'SL' else 0.0)
+        group = 'ضدروند' if t['counter'] else 'هم‌جهت'
+        if result in ('TP1', 'SL'):
+            for k in ('کل', group):
+                s = self.stats[k]
+                s['n'] += 1
+                s['tp' if result == 'TP1' else 'sl'] += 1
+                s['r'] += r
+            for f in (t['flags'] or ['بدون‌الگو']):
+                fs = self.flag_stats.setdefault(f, [0, 0])
+                fs[0] += 1
+                fs[1] += 1 if result == 'TP1' else 0
+        _log(f"📒 RESULT | #{t['id']} | {t['symbol']} | {t['direction']}{' (ضدروند)' if t['counter'] else ''} | {result}"
+             f"{' (هر دو در یک کندل؛ SL فرض شد)' if ambiguous else ''} | R={r:+.2f} | امتیاز {t['score']} [{'+'.join(t['flags']) or '—'}] | "
+             f"بیشترین پیشروی {t['mfe']:.2f}R / برگشت {t['mae']:.2f}R | مدت {(ms - t['created_ms']) / 3_600_000:.1f}h | "
+             f"ورود {_fmt(t['entry'])} SL {_fmt(t['sl'])} TP {_fmt(t['tp'])}")
+        parts = [f"{k}: {s['n']} معامله، وین‌ریت {s['tp'] / s['n'] * 100:.0f}%، جمع R {s['r']:+.2f}" for k, s in self.stats.items() if s['n']]
+        if parts:
+            _log(f"📈 آمار | " + " | ".join(parts))
+        if self.flag_stats:
+            _log("📈 الگوها | " + " ، ".join(f"{f}: {v[1]}/{v[0]} TP" for f, v in self.flag_stats.items()))
+        self.tracked = [x for x in self.tracked if x['status'] == 'OPEN']
+
+    # ==========================================================
+    # حلقه‌ی اصلی هر نماد
+    # ==========================================================
+    async def process_symbol(self, symbol):
+        md = self.market_data
+        h4 = await md.get_tf_data(symbol, "240")      # فقط EMA200 برای جهت روند
+        h1 = await md.get_tf_data(symbol, "60")
+        m15 = await md.get_tf_data(symbol, "15")
+        m5 = await md.get_tf_data(symbol, "5")
+        if not all([h4, h1, m15, m5]):
+            _log(f"⚠️ [{TAG}] {symbol}: data missing (4H={bool(h4)}, 1H={bool(h1)}, 15m={bool(m15)}, 5m={bool(m5)})")
+            return
+
+        now_ms = self._now_ms()
+        price = m5['price']
+        trend = "UPTREND" if price > h4['ema_200'] else "DOWNTREND"
+        atr5, atr15, atr1h = m5['atr'], m15['atr'], h1['atr']
+
+        book = self._get_levels(symbol)
+        self._pick_active(book, price)
+        self._check_warnings(symbol, book, price, now_ms)
+
+        h1c = _tail(h1, now_ms, 30)
+        c15 = _tail(m15, now_ms, 60)
+        c5 = _tail(m5, now_ms, 80)
+        v5 = dict(zip(m5['times'], m5.get('volumes', [])))
+        lst = self.setups.setdefault(symbol, [])
+        open_n = lambda: len([x for x in lst if x['state'] != 'DEAD'])
+
+        # --- رویدادهای جدید ---
+        prev = self.prev_scan.get(symbol)
+        if not prev:
+            # دیپلوی/ری‌استارت/بازخوانی سطوح: اگر قیمت همین الان داخل زون فعال است، ثبتش کن
+            tol = price * self.START_INSIDE_TOL_PCT / 100
+            for lv in book:
+                if lv.get('active') and lv['low'] - tol <= price <= lv['high'] + tol and open_n() < self.MAX_SETUPS:
+                    role = self._side_from_history(lv, price, c5, c15)
+                    lst.append(self._new_setup(symbol, lv, role, now_ms, price, now_ms, c15, atr15, True, 'ok',
+                                               f"شروع/بازخوانی: قیمت داخل زون ۱ساعته است ({'از پایین' if role == 'RES' else 'از بالا'} آمده)"))
+        else:
+            logged = 0
+            for lv, role, ev_ms in self._detect_events(symbol, prev, c5, price, now_ms):
+                if not lv.get('active'):
+                    key = (symbol, round(lv['low'], 4))
+                    if logged < 5 and self.log_only_until.get(key, 0) <= now_ms:
+                        self.log_only_until[key] = now_ms + self.LOG_ONLY_COOLDOWN_H * 3_600_000
+                        logged += 1
+                        _log(f"📝 [{TAG}][{symbol}] سطح غیرفعال {'مقاومت' if role == 'RES' else 'حمایت'} {self._zs(lv)} در {_ts(ev_ms)} لمس/شکسته شد | "
+                             f"قیمت {_fmt(price)} (فقط ثبت)")
+                    continue
+                if open_n() >= self.MAX_SETUPS:
+                    continue
+                ok, why = self._fresh_approach(lv, role, c15, atr15, ev_ms, price)
+                passed = self._beyond(role, lv, price)
+                origin = (f"عبور از سطح بین دو اسکن (قبلی {_fmt(prev['price'])} → الان {_fmt(price)})" if passed
+                          else f"لمس سطح در {_ts(ev_ms)} UTC")
+                lst.append(self._new_setup(symbol, lv, role, ev_ms, price, now_ms, c15, atr15, ok, why, origin))
+
+        # --- پیشبرد ستاپ‌ها ---
+        for st in lst:
+            if st['state'] != 'DEAD':
+                self._advance(symbol, st, trend, price, h1c, c15, c5, v5, atr5, atr15, atr1h, book, now_ms)
+        self.setups[symbol] = lst = [x for x in lst if x['state'] != 'DEAD']
+
+        # --- نتیجه‌ی سیگنال‌های قبلی ---
+        self._track_update(symbol, c5, now_ms)
+        self.prev_scan[symbol] = {'levels': book, 'price': price, 'ms': now_ms}
+
+        # --- لاگ وضعیت (کم‌تکرار) ---
+        sig = tuple((s['state'], s['kind'], s['role']) for s in lst)
+        ls = self.last_status.get(symbol)
+        if not ls or ls[0] != sig or now_ms - ls[1] >= self.STATUS_LOG_EVERY_SEC * 1000:
+            self.last_status[symbol] = (sig, now_ms)
+
+            def _lv(b):
+                mark = ('▲مقاومت' if b['role'] == 'RES' else '▼حمایت') if b['active'] else ('ر' if b['role'] == 'RES' else 'ح')
+                return f"{mark} {self._zs(b)}"
+            parts = [f"{s['state']}/{s['kind'] or 'EVENT'} {s['role']} {self._zs(s['zone'])}" for s in lst]
+            _log(f"📊 [{TAG}] {symbol} — {trend} | قیمت {_fmt(price)} | سطوح ۱ساعته: "
+                 + (" ، ".join(_lv(b) for b in sorted(book, key=lambda b: -b['low'])) or "—")
+                 + " | ستاپ‌ها: " + (" || ".join(parts) if parts else "—"))
