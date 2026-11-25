@@ -1,4 +1,4 @@
-
+import importlib.util
 
 import os
 
@@ -359,33 +359,67 @@ class StrategyManager:
 
 
     def _load_levels(self, first=False):
+        """Load levels.py from the exact sibling path, not an arbitrary module on sys.path.
 
+        Keep the last known-good levels if the file is temporarily malformed.
+        """
         try:
+            if not os.path.isfile(self._lv_path):
+                raise FileNotFoundError(f'levels.py not found at {self._lv_path}')
 
-            if self._lv_mod is None:
+            # A unique, path-based module name prevents importing another levels.py
+            # elsewhere in the container and supports reliable hot reload.
+            spec = importlib.util.spec_from_file_location('_v90_levels_local', self._lv_path)
+            if spec is None or spec.loader is None:
+                raise ImportError(f'cannot create loader for {self._lv_path}')
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
 
-                self._lv_mod = importlib.import_module('levels')
+            raw_levels = getattr(mod, 'LEVELS', None)
+            if not isinstance(raw_levels, dict):
+                raise TypeError('LEVELS must be a dictionary')
 
-            elif not first:
+            # Validate and normalize symbols/zones, while allowing intentionally empty
+            # symbol entries (e.g. LTCUSDT) without making all symbols unavailable.
+            clean_levels = {}
+            for sym, zones in raw_levels.items():
+                if not isinstance(sym, str) or not sym.strip():
+                    continue
+                if zones is None:
+                    zones = []
+                if not isinstance(zones, (list, tuple)):
+                    raise TypeError(f'LEVELS[{sym!r}] must be a list of zones')
+                valid_zones = []
+                for zone in zones:
+                    if isinstance(zone, (int, float)):
+                        if zone > 0:
+                            valid_zones.append(float(zone))
+                        continue
+                    if isinstance(zone, (list, tuple)) and len(zone) == 2:
+                        try:
+                            lo, hi = float(zone[0]), float(zone[1])
+                        except (TypeError, ValueError):
+                            continue
+                        if lo > 0 and hi > 0:
+                            valid_zones.append([min(lo, hi), max(lo, hi)])
+                clean_levels[sym.strip()] = valid_zones
 
-                importlib.reload(self._lv_mod)
+            configured = getattr(mod, 'SYMBOLS', None)
+            cfg_symbols = list(configured) if configured else list(clean_levels.keys())
+            cfg_symbols = [s for s in cfg_symbols if isinstance(s, str) and s in clean_levels]
+            if not cfg_symbols:
+                cfg_symbols = list(clean_levels.keys())
 
-            mod = self._lv_mod
-
-            self.levels = dict(mod.LEVELS)
-
+            # Only commit after validation succeeds; never discard prior valid config
+            # due to a partially edited file.
+            self.levels = clean_levels
             self.levels_updated = getattr(mod, 'LEVELS_UPDATED', None)
-
-            self.cfg_symbols = list(getattr(mod, 'SYMBOLS', None) or self.levels.keys())
-
+            self.cfg_symbols = cfg_symbols
+            self._lv_mod = mod
             self.levels_error = None
-
         except Exception as e:
-
             self.levels_error = repr(e)
-
         self._lv_mtime = self._mtime()
-
         return self.levels_error is None
 
 
@@ -1488,5 +1522,3 @@ class StrategyManager:
             _log(f"📊 [{TAG}] {symbol} — {trend} | قیمت {_fmt(price)} | سطوح ۱ساعته: "
 
                  + (" ، ".join(_lv(b) for b in sorted(book, key=lambda b: -b['low'])) or "—")
-
-                 + " | ستاپ‌ها: " + (" || ".join(parts) if parts else "—"))
