@@ -7,6 +7,9 @@ logger = get_trading_logger()
 
 
 class MarketDataHandler:
+    """دیتای کندل بسته‌شده + قیمت زنده از Bybit.
+    تایم‌فریم‌های مورد نیاز استراتژی V90: 240 (فقط EMA200 برای جهت روند)، 15 (تأیید)، 5 (ورود)."""
+
     def __init__(self):
         self.session = HTTP(testnet=False)
         self.symbols = ["BTCUSDT", "ETHUSDT", "LTCUSDT", "XAUUSDT"]
@@ -15,9 +18,9 @@ class MarketDataHandler:
         self._price_cache = {}
         self.EMA_PERIOD = 200
         self.ATR_PERIOD = 14
-        self.LIMITS = {"240": 1000, "60": 300, "15": 300, "D": 180, "W": 60}
+        self.LIMITS = {"240": 500, "60": 300, "15": 300, "5": 300, "D": 180, "W": 60}
         self.DEFAULT_LIMIT = 200
-        self.PRICE_TTL_SEC = 5
+        self.PRICE_TTL_SEC = 3
 
     async def start_data_collection(self):
         while True:
@@ -70,6 +73,7 @@ class MarketDataHandler:
             return None
         interval_ms = self._interval_ms(interval)
         now_ms = int(time.time() * 1000)
+        # فقط کندل‌های بسته‌شده (کندل در حال تشکیل حذف می‌شود)
         rows = [r for r in rows if int(r[0]) + interval_ms <= now_ms]
         rows.sort(key=lambda r: int(r[0]))
         if not rows:
@@ -78,11 +82,13 @@ class MarketDataHandler:
         highs = [float(r[2]) for r in rows]
         lows = [float(r[3]) for r in rows]
         opens = [float(r[1]) for r in rows]
+        volumes = [float(r[5]) for r in rows]
         ema_200 = self._calculate_ema(closes, self.EMA_PERIOD) if interval == "240" else 0.0
         atr = self._calculate_atr(highs, lows, closes, self.ATR_PERIOD)
         return {
             'times': [int(r[0]) for r in rows], 'ms': interval_ms,
             'opens': opens, 'highs': highs, 'lows': lows, 'closes': closes,
+            'volumes': volumes,
             'close': closes[-1], 'ema_200': ema_200, 'atr': atr,
             'count': len(rows),
         }
@@ -121,12 +127,14 @@ class MarketDataHandler:
             if candles:
                 self._cache[key] = candles
                 cached = candles
-                # Ø¢Ø®Ø±ÛÙ Ú©ÙØ¯Ù Ø¨Ø³ØªÙâØ´Ø¯Ù Ø¯Ø± Ø²ÙØ§Ù open+interval Ø¨Ø³ØªÙ Ø´Ø¯ÙØ Ø¯Ø± ÙÙØ§Ù ÙØ­Ø¸Ù Ø¯ÙØ¨Ø§Ø±Ù Ø¯Ø±ÛØ§ÙØª Ú©Ù.
+                # آخرین کندل بسته‌شده در open+interval بسته شده؛ کندل بعدی در open+2*interval بسته می‌شود.
+                # همان لحظه (+۲ ثانیه) دوباره دریافت می‌کنیم.
                 next_close = (candles['times'][-1] + 2 * candles['ms']) / 1000
                 self._next_fetch[key] = next_close + 2
             else:
                 self._next_fetch[key] = time.time() + 30
         if not cached:
             return None
-        cached['price'] = await self._get_price(symbol) or cached['close']
-        return cached
+        out = dict(cached)      # کپی سطحی تا قیمت زنده‌ی یک نماد روی کش مشترک نوشته نشود
+        out['price'] = await self._get_price(symbol) or cached['close']
+        return out
