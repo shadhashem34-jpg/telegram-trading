@@ -1,6 +1,6 @@
 import asyncio
-import importlib
 import os
+import runpy
 import time
 from datetime import datetime, timezone
 from logger import get_trading_logger
@@ -149,7 +149,6 @@ class StrategyManager:
         self.flag_stats = {}
 
         # ---- سطوح (با بازخوانی خودکار) ----
-        self._lv_mod = None
         self._lv_mtime = None
         self._lv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'levels.py')
         self.levels, self.levels_updated, self.cfg_symbols, self.levels_error = {}, None, [], None
@@ -177,6 +176,10 @@ class StrategyManager:
         while self.running:
             self._check_levels_reload()
             syms = self.symbols
+            now = self._now_ms()
+            for sym in self.cfg_symbols:
+                if sym not in syms:
+                    self._warn(sym, 'nolevels', "هیچ سطحی در levels.py ندارد؛ این نماد اسکن نمی‌شود (لیستش خالی یا کامنت است)", now)
             if not syms:
                 self._warn('ALL', 'empty', "هیچ نمادی سطح ندارد؛ levels.py را پر کن", self._now_ms())
             for symbol in syms:
@@ -201,15 +204,12 @@ class StrategyManager:
             return None
 
     def _load_levels(self, first=False):
+        """فایل levels.py را مستقیم اجرا و می‌خواند (نه import)؛ پس کش .pyc یا مسیر اجرا مشکل نمی‌سازد."""
         try:
-            if self._lv_mod is None:
-                self._lv_mod = importlib.import_module('levels')
-            elif not first:
-                importlib.reload(self._lv_mod)
-            mod = self._lv_mod
-            self.levels = dict(mod.LEVELS)
-            self.levels_updated = getattr(mod, 'LEVELS_UPDATED', None)
-            self.cfg_symbols = list(getattr(mod, 'SYMBOLS', None) or self.levels.keys())
+            ns = runpy.run_path(self._lv_path)
+            self.levels = dict(ns['LEVELS'])
+            self.levels_updated = ns.get('LEVELS_UPDATED')
+            self.cfg_symbols = list(ns.get('SYMBOLS') or self.levels.keys())
             self.levels_error = None
         except Exception as e:
             self.levels_error = repr(e)
@@ -270,9 +270,15 @@ class StrategyManager:
             _log(f"⚠️ [{TAG}][{symbol}] {msg}")
 
     def _check_warnings(self, symbol, book, price, now_ms):
-        if not any(b['role'] == 'RES' for b in book):
+        tol = price * self.START_INSIDE_TOL_PCT / 100
+        inside = any(b['low'] - tol <= price <= b['high'] + tol for b in book)
+        if inside:
+            pass        # قیمت داخل یکی از زون‌هاست؛ سطحِ «پیدا نشد» معنی ندارد (رویداد جداگانه ثبت می‌شود)
+        elif not any(b['role'] == 'RES' for b in book):
             self._warn(symbol, 'nores', f"قیمت ({_fmt(price)}) بالاتر از همه‌ی سطوح است؛ مقاومتی نیست. سطوح را به‌روز کن", now_ms)
-        if not any(b['role'] == 'SUP' for b in book):
+        if inside:
+            pass
+        elif not any(b['role'] == 'SUP' for b in book):
             self._warn(symbol, 'nosup', f"قیمت ({_fmt(price)}) پایین‌تر از همه‌ی سطوح است؛ حمایتی نیست. سطوح را به‌روز کن", now_ms)
         if self.levels_updated:
             ts = _parse_updated(self.levels_updated)
@@ -781,29 +787,41 @@ class StrategyManager:
         # --- رویدادهای جدید ---
         prev = self.prev_scan.get(symbol)
         if not prev:
-            # دیپلوی/ری‌استارت/بازخوانی سطوح: اگر قیمت همین الان داخل زون فعال است، ثبتش کن
+            # دیپلوی/ری‌استارت/بازخوانی سطوح: اگر قیمت همین الان داخل یک زون است، همان لحظه به‌عنوان رویداد ثبت می‌شود
+            # و منتظر بسته‌شدن کندل ۱ساعته می‌ماند (بقیه‌ی مراحل مثل لمس عادی).
             tol = price * self.START_INSIDE_TOL_PCT / 100
             for lv in book:
-                if lv.get('active') and lv['low'] - tol <= price <= lv['high'] + tol and open_n() < self.MAX_SETUPS:
-                    role = self._side_from_history(lv, price, c5, c15)
-                    lst.append(self._new_setup(symbol, lv, role, now_ms, price, now_ms, c15, atr15, True, 'ok',
-                                               f"شروع/بازخوانی: قیمت داخل زون ۱ساعته است ({'از پایین' if role == 'RES' else 'از بالا'} آمده)"))
+                if not (lv['low'] - tol <= price <= lv['high'] + tol):
+                    continue
+                if open_n() >= self.MAX_SETUPS:
+                    break
+                if any(not (lv['high'] < x['zone']['low'] - lv['high'] * 0.001 or lv['low'] > x['zone']['high'] + lv['high'] * 0.001)
+                       for x in lst if x['state'] != 'DEAD'):
+                    continue            # برای همین زون ستاپ باز داریم
+                if self._is_blocked(symbol, lv, now_ms):
+                    self._warn(symbol, ('blocked', round(lv['low'], 4)),
+                               f"قیمت داخل زون {self._zs(lv)} است ولی این زون به‌خاطر کول‌داون (سیگنال/انقضای اخیر) موقتاً بلاک است", now_ms)
+                    continue
+                role = self._side_from_history(lv, price, c5, c15)
+                lst.append(self._new_setup(symbol, lv, role, now_ms, price, now_ms, c15, atr15, True, 'ok',
+                                           f"شروع/بازخوانی سطوح: قیمت داخل زون ۱ساعته است ({'از پایین' if role == 'RES' else 'از بالا'} آمده)"))
         else:
             logged = 0
             for lv, role, ev_ms in self._detect_events(symbol, prev, c5, price, now_ms):
-                if not lv.get('active'):
+                # «عبور»: قیمت اسکن قبلی یک طرف زون بود و الان کامل آن طرف دیگر است (حتی اگر زون فعال/نزدیک‌ترین نبود)
+                passed = self._beyond(role, lv, price)
+                if not lv.get('active') and not passed:
                     key = (symbol, round(lv['low'], 4))
                     if logged < 5 and self.log_only_until.get(key, 0) <= now_ms:
                         self.log_only_until[key] = now_ms + self.LOG_ONLY_COOLDOWN_H * 3_600_000
                         logged += 1
-                        _log(f"📝 [{TAG}][{symbol}] سطح غیرفعال {'مقاومت' if role == 'RES' else 'حمایت'} {self._zs(lv)} در {_ts(ev_ms)} لمس/شکسته شد | "
+                        _log(f"📝 [{TAG}][{symbol}] سطح غیرفعال {'مقاومت' if role == 'RES' else 'حمایت'} {self._zs(lv)} در {_ts(ev_ms)} لمس شد | "
                              f"قیمت {_fmt(price)} (فقط ثبت)")
                     continue
                 if open_n() >= self.MAX_SETUPS:
                     continue
                 ok, why = self._fresh_approach(lv, role, c15, atr15, ev_ms, price)
-                passed = self._beyond(role, lv, price)
-                origin = (f"عبور از سطح بین دو اسکن (قبلی {_fmt(prev['price'])} → الان {_fmt(price)})" if passed
+                origin = (f"عبور/شکست احتمالی بین دو اسکن (قبلی {_fmt(prev['price'])} → الان {_fmt(price)})" if passed
                           else f"لمس سطح در {_ts(ev_ms)} UTC")
                 lst.append(self._new_setup(symbol, lv, role, ev_ms, price, now_ms, c15, atr15, ok, why, origin))
 
